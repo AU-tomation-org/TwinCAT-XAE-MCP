@@ -50,9 +50,13 @@ namespace Te1000Daemon
         // handlers whose whole job is to act on an existing IDE (shutdown), where the
         // "create" half of activeOrCreate would start the very thing being ended.
         // Returns null when no IDE is running.
+        //
+        // Still honours an explicit target: shutting down "the running IDE" and shutting
+        // down "the IDE with pid N" are different requests, and dropping the target here
+        // silently closed whichever instance the session happened to hold.
         public dynamic DteActiveOnly()
         {
-            return Session.GetDte(ProgId, "active", true);
+            return Session.GetDte(ProgId, "active", true, Attach);
         }
 
         // Drop the cached DTE/sysmanager: the IDE they point at is gone or unusable, so
