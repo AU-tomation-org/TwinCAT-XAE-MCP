@@ -44,6 +44,7 @@ const {
   CPP_PUBLISH_CONFIRMATION,
   MEASUREMENT_RECORD_CONFIRMATION,
   LICENSE_ACTIVATE_CONFIRMATION,
+  IDE_SHUTDOWN_CONFIRMATION,
 } = require("./toolSchemas.js");
 
 // 64-bit TcXaeShell (DTE.17.0) implies a 64-bit Windows, so the live UIA helper
@@ -79,8 +80,27 @@ function sessionCall(mode) {
   });
 }
 
+// TE1000_MODE — an environment default for the per-call `mode`, the companion of
+// TE1000_PROGID above. Without it `mode` defaults to "active" on nearly every
+// tool, and "active" attaches to whichever running IDE the ROT hands over first
+// that has ANY solution open (ComSession.GetPreferredDteFromRot) — so on a machine
+// where someone is working in Visual Studio, an unqualified call reaches THEIR IDE
+// and builds THEIR solution. Some tools (xae_build among them) expose no mode
+// parameter at all, so per-call discipline cannot cover every path; only a default
+// applied here can. Set TE1000_MODE=create to keep a session on its own instance.
+//
+// An explicit per-call mode always wins, and open_solution keeps its own
+// activeOrCreate default (set in the xae handler) — this only fills the gap where
+// no mode was chosen at all.
+const VALID_MODES = ["active", "activeOrCreate", "create"];
+const ENV_MODE = VALID_MODES.includes(process.env.TE1000_MODE) ? process.env.TE1000_MODE : null;
+if (process.env.TE1000_MODE && !ENV_MODE) {
+  console.error(`te1000-mcp: ignoring TE1000_MODE="${process.env.TE1000_MODE}" (expected one of ${VALID_MODES.join(", ")})`);
+}
+
 async function bridgeCall(action, payload = {}) {
   if (process.env.TE1000_PROGID && !payload.progId) payload.progId = process.env.TE1000_PROGID;
+  if (ENV_MODE && !payload.mode) payload.mode = ENV_MODE;
   return runBridge(action, payload);
 }
 
@@ -198,11 +218,17 @@ function buildServer() {
 server.registerTool(
   "xae",
   toolSchemas.xae,
-  async ({ action, solutionPath, closeExisting, discardChanges, filter, limit, severityFilter, button, remember, mode }) => {
+  async ({ action, solutionPath, closeExisting, discardChanges, filter, limit, severityFilter, button, remember, save, confirm, mode }) => {
     const payload = { mode };
+    if (action === "shutdown_ide") {
+      if (confirm !== IDE_SHUTDOWN_CONFIRMATION) {
+        throw new Error(`Blocked. shutdown_ide closes the running XAE/VS instance. Re-run with confirm="${IDE_SHUTDOWN_CONFIRMATION}" to proceed.`);
+      }
+      Object.assign(payload, { save: save !== false });
+    }
     if (action === "open_solution") {
       need({ solutionPath }, ["solutionPath"], action);
-      Object.assign(payload, { solutionPath, visible: true, closeExisting: closeExisting || false, discardChanges: discardChanges === true, mode: mode || "activeOrCreate" });
+      Object.assign(payload, { solutionPath, visible: true, closeExisting: closeExisting || false, discardChanges: discardChanges === true, mode: mode || ENV_MODE || "activeOrCreate" });
     }
     if (action === "list_commands") Object.assign(payload, { filter, limit });
     if (action === "error_list") Object.assign(payload, { limit, severityFilter });

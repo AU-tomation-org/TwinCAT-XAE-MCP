@@ -28,6 +28,23 @@ namespace Te1000Daemon
 
         public dynamic Dte(bool visible = true) { return Session.GetDte(ProgId, Mode, visible); }
 
+        // Attach to an IDE only if one is already running, whatever Mode says. For the
+        // handlers whose whole job is to act on an existing IDE (shutdown), where the
+        // "create" half of activeOrCreate would start the very thing being ended.
+        // Returns null when no IDE is running.
+        public dynamic DteActiveOnly()
+        {
+            return Session.GetDte(ProgId, "active", true);
+        }
+
+        // Drop the cached DTE/sysmanager: the IDE they point at is gone or unusable, so
+        // the next call has to reconnect instead of talking to a dead RCW.
+        public void InvalidateSession()
+        {
+            Session.MarkStale();
+            if (Cache != null) Cache.Clear();
+        }
+
         public dynamic SysManager()
         {
             Session.GetDte(ProgId, Mode, true);

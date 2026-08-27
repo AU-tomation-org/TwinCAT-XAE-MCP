@@ -25,6 +25,7 @@ namespace Te1000Daemon
             h["xae_clear_error_list"] = XaeClearErrorList;
             h["xae_save_all"] = XaeSaveAll;
             h["xae_solution_build"] = XaeSolutionBuild;
+            h["xae_shutdown_ide"] = XaeShutdownIde;
         }
 
         // ---- shared helpers (port of bridge helper functions) ----------------
@@ -74,8 +75,9 @@ namespace Te1000Daemon
                 bool isOpen = info.Bool("isOpen");
                 if (!isOpen) throw new BridgeException("Solution is not open yet");
                 string fullName = info.Str("fullName");
+                // Compare the paths as paths, not as strings -- see PathUtil.SamePath.
                 if (!string.IsNullOrWhiteSpace(expectedPath) &&
-                    !string.Equals(fullName, expectedPath, StringComparison.Ordinal))
+                    !PathUtil.SamePath(fullName, expectedPath))
                 {
                     throw new BridgeException("Different solution is active: " + fullName);
                 }
@@ -377,7 +379,94 @@ namespace Te1000Daemon
             data["available"] = true;
             data["count"] = result.TotalCount;
             data["returned"] = result.Items.Count;
+            // Say it out loud when the severity filter could not do its job: these rows
+            // are TwinCAT PLC rows, which report every severity at the same ErrorLevel
+            // (see SeverityMatches). They are kept, not dropped, so an errors-only query
+            // never comes back empty on a PLC project -- but the caller must read the
+            // descriptions to tell an error from a warning.
+            if (result.AmbiguousCount > 0)
+            {
+                data["severityUndecidableCount"] = result.AmbiguousCount;
+                data["severityNote"] = "TwinCAT PLC rows report errors, warnings and info at the same ErrorLevel; rows kept regardless of severityFilter.";
+            }
             data["items"] = result.Items;
+            return data;
+        }
+
+        // xae_shutdown_ide -- close the IDE this session is driving.
+        //
+        // Without this the daemon had no way to end an IDE it had started: killing the
+        // daemon leaves devenv running, holding the solution open, invisible to the next
+        // run (verified). A long-lived automation service that cannot put back what it
+        // started leaks one IDE process per session.
+        //
+        // Quit() alone is not enough: with dirty documents it raises the modal "Save
+        // changes?" prompt, which is exactly the thing that wedges a headless daemon. So
+        // the dirty state is settled FIRST -- saved when save is true (the default),
+        // discarded when it is false -- the solution is closed with saveFirst:false, and
+        // only then does Quit() run, with nothing left to prompt about.
+        //
+        // Never creates an IDE just to close it: mode is forced to "active", so with no
+        // IDE running this reports alreadyClosed instead of starting one.
+        private static Json.JObj XaeShutdownIde(ActionContext ctx)
+        {
+            bool save = true;
+            if (ctx.Payload.Has("save")) save = ctx.Payload.Bool("save");
+
+            dynamic dte;
+            try
+            {
+                dte = ctx.DteActiveOnly();
+            }
+            catch (Exception)
+            {
+                dte = null;
+            }
+            if (dte == null)
+            {
+                var none = new Json.JObj();
+                none["alreadyClosed"] = true;
+                none["quit"] = false;
+                return none;
+            }
+
+            string closedSolution = null;
+            try { closedSolution = GetSolutionInfo(dte).Str("fullName"); }
+            catch { }
+
+            bool saved = false;
+            if (save)
+            {
+                try { dte.ExecuteCommand("File.SaveAll"); saved = true; }
+                catch (Exception ex) { Log.Error("shutdown: SaveAll failed", ex); }
+            }
+
+            // saveFirst:false either way -- the save above already happened, or the
+            // caller asked to discard. Passing true here is what summons the prompt.
+            bool solutionClosed = false;
+            try { dte.Solution.Close(false); solutionClosed = true; }
+            catch (Exception ex) { Log.Error("shutdown: Solution.Close failed", ex); }
+
+            bool quit = false;
+            string quitError = null;
+            try { dte.Quit(); quit = true; }
+            catch (Exception ex)
+            {
+                // A Quit() that races the IDE tearing down its COM server reports an
+                // RPC failure although the IDE is on its way out; report it, do not throw.
+                quitError = ex.GetType().Name + ": " + ex.Message;
+                Log.Error("shutdown: Quit failed", ex);
+            }
+
+            // The cached DTE points at an IDE that is gone; the next call must reconnect.
+            ctx.InvalidateSession();
+
+            var data = new Json.JObj();
+            data["quit"] = quit;
+            data["saved"] = saved;
+            data["solutionClosed"] = solutionClosed;
+            if (!string.IsNullOrEmpty(closedSolution)) data["solution"] = closedSolution;
+            if (!string.IsNullOrEmpty(quitError)) data["quitError"] = quitError;
             return data;
         }
 
@@ -482,6 +571,17 @@ namespace Te1000Daemon
         {
             public int TotalCount;
             public Json.JArr Items;
+            // How many matched rows matched only because their severity was
+            // undecidable (TwinCAT PLC rows). Zero when no filter is active.
+            public int AmbiguousCount;
+        }
+
+        // A row that came from a TwinCAT PLC project: its Project ends in .plcproj.
+        // These are the rows whose ErrorLevel carries no severity -- see SeverityMatches.
+        private static bool IsPlcProjectRow(string project)
+        {
+            if (string.IsNullOrEmpty(project)) return false;
+            return project.EndsWith(".plcproj", StringComparison.OrdinalIgnoreCase);
         }
 
         // R6: ErrorLevel serializes as the strings "vsBuildErrorLevelHigh"/"Medium"/
@@ -489,9 +589,36 @@ namespace Te1000Daemon
         // on the substring so each filter maps to exactly one documented severity:
         // errors -> High, warnings -> Medium. Low (message) rows show only under 'all'
         // (folding them into 'warnings' would inflate the warning count).
-        private static bool SeverityMatches(string level, string filter)
+        //
+        // That mapping holds for C++/C#/HMI projects. It does NOT hold for TwinCAT PLC
+        // projects, measured on TC 3.1.4026: the PLC compiler reports EVERY row at
+        // vsBuildErrorLevelMedium -- a real error ("Identifier 'x' not defined"), an
+        // explicit {warning '...'} pragma and an explicit {info '...'} pragma all come
+        // back Medium. High never appears on a .plcproj row at all, and Low is what the
+        // XAE shell uses for its own progress messages. So on those rows the level says
+        // nothing about severity, and dropping them under filter "errors" made
+        // severityFilter:"errors" return ZERO on every TwinCAT project -- the bug this
+        // replaces. A .plcproj row therefore matches BOTH "errors" and "warnings", and
+        // reports itself as ambiguous so the caller is told the filter could not
+        // discriminate instead of silently trusting a filtered list.
+        //
+        // VS itself DOES know the real severity -- its Error List shows "Warning C0373"
+        // and "Error C0046" on the very rows that come back Medium here. That severity
+        // lives on IVsErrorItem.GetCategory, behind SVsErrorList, and is NOT reachable
+        // from here: the IVs* shell interfaces have no cross-process marshalling, and a
+        // QI for OLE IServiceProvider on an out-of-process DTE fails outright (probed
+        // 2026-08-27). Only in-process code -- a VSIX -- can read it. EnvDTE's ErrorItem
+        // exposes no Code and no Severity, so for an external automation client the
+        // ambiguity below is not a shortcut, it is the whole of what is knowable.
+        private static bool SeverityMatches(string level, string filter, string project, out bool ambiguous)
         {
+            ambiguous = false;
             if (string.IsNullOrEmpty(filter) || filter == "all") return true;
+            if (IsPlcProjectRow(project))
+            {
+                ambiguous = true;
+                return true;
+            }
             if (level == null) return false;
             if (filter == "errors") return level.IndexOf("High", StringComparison.OrdinalIgnoreCase) >= 0;
             if (filter == "warnings") return level.IndexOf("Medium", StringComparison.OrdinalIgnoreCase) >= 0;
@@ -531,28 +658,36 @@ namespace Te1000Daemon
                 // the full walk — keeps the common build-flood path bounded (R7).
                 bool filtering = !(string.IsNullOrEmpty(severityFilter) || severityFilter == "all");
                 int matchedTotal = 0;
+                int ambiguousTotal = 0;
                 var items = new Json.JArr();
                 for (int i = 1; i <= rawCount; i++)
                 {
                     if (!filtering && items.Count >= limit) break; // total is rawCount; no need to walk on
                     EnvDTE80.ErrorItem item = errorItems.Item(i);
                     string level = ComHelpers.SafeStr(delegate() { return item.ErrorLevel; });
-                    if (!SeverityMatches(level, severityFilter)) continue;
+                    // Project is read before the filter now: on a TwinCAT PLC row it is
+                    // what decides the match, because the level cannot.
+                    string project = ComHelpers.SafeStr(delegate() { return item.Project; });
+                    bool ambiguous;
+                    if (!SeverityMatches(level, severityFilter, project, out ambiguous)) continue;
                     matchedTotal++;
+                    if (ambiguous) ambiguousTotal++;
                     if (items.Count >= limit) continue; // keep counting, stop collecting
                     var o = new Json.JObj();
                     o["description"] = ComHelpers.SafeStr(delegate() { return item.Description; });
                     o["fileName"] = ComHelpers.SafeStr(delegate() { return item.FileName; });
                     o["line"] = NullableInt(delegate() { return item.Line; });
                     o["column"] = NullableInt(delegate() { return item.Column; });
-                    o["project"] = ComHelpers.SafeStr(delegate() { return item.Project; });
+                    o["project"] = project;
                     o["errorLevel"] = level;
+                    if (ambiguous) o["severityUndecidable"] = true;
                     items.Add(o);
                 }
 
                 ErrorListResult result = new ErrorListResult();
                 result.TotalCount = filtering ? matchedTotal : rawCount;
                 result.Items = items;
+                result.AmbiguousCount = ambiguousTotal;
                 return result;
             }
             catch (Exception ex)

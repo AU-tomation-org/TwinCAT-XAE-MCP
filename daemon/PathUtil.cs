@@ -7,6 +7,31 @@ namespace Te1000Daemon
     // nothing in this toolchain may write toward the EL6910 safety system.
     public static class PathUtil
     {
+        // Are these two strings the same file on disk? Compares the canonical form,
+        // not the characters. Windows accepts both separators and is case-insensitive,
+        // so a caller who passes a solution path with forward slashes -- which is what
+        // a JSON-speaking client naturally does -- used to have the solution opened and
+        // then be told "Different solution is active", because the DTE reports the path
+        // back with backslashes and the comparison was ordinal.
+        //
+        // GetFullPath also collapses . and .. and trailing separators. It can throw on a
+        // malformed path; that just falls back to the ordinal-insensitive comparison,
+        // which is still no stricter than what came before.
+        public static bool SamePath(string a, string b)
+        {
+            if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b)) return false;
+            string na = a, nb = b;
+            try
+            {
+                na = System.IO.Path.GetFullPath(a.Trim());
+                nb = System.IO.Path.GetFullPath(b.Trim());
+            }
+            catch { }
+            na = na.TrimEnd('\\', '/');
+            nb = nb.TrimEnd('\\', '/');
+            return string.Equals(na, nb, StringComparison.OrdinalIgnoreCase);
+        }
+
         // Assert-NotSafetyPath (L1576-1587): reject any path rooted at the TISC
         // safety project. Throws BridgeException with the exact PS message.
         public static void AssertNotSafetyPath(string path)

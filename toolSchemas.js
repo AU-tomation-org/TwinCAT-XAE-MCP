@@ -48,6 +48,7 @@ const MODULE_CONTEXT_CONFIRMATION = "ALLOW_TWINCAT_MODULE_CONTEXT";
 const CPP_PUBLISH_CONFIRMATION = "ALLOW_CPP_PUBLISH";
 const MEASUREMENT_RECORD_CONFIRMATION = "ALLOW_MEASUREMENT_RECORD";
 const LICENSE_ACTIVATE_CONFIRMATION = "ALLOW_LICENSE_ACTIVATE";
+const IDE_SHUTDOWN_CONFIRMATION = "ALLOW_XAE_SHUTDOWN";
 
 const CONFIRMATIONS = {
   ACTIVATE_CONFIRMATION,
@@ -62,6 +63,7 @@ const CONFIRMATIONS = {
   CPP_PUBLISH_CONFIRMATION,
   MEASUREMENT_RECORD_CONFIRMATION,
   LICENSE_ACTIVATE_CONFIRMATION,
+  IDE_SHUTDOWN_CONFIRMATION,
 };
 
 // XAE single-tool action name -> daemon action name (used by the xae handler).
@@ -76,13 +78,14 @@ const XAE_ACTIONS = {
   list_commands: "xae_list_commands",
   dialog_probe: "dialog_probe",
   dialog_resolve: "dialog_resolve",
+  shutdown_ide: "xae_shutdown_ide",
 };
 
 // --- The tool schemas, keyed by tool name. Each entry is the EXACT config object
 // (description + zod inputSchema raw shape) that registerTool consumes. ----------
 const toolSchemas = {
   xae: {
-    description: "XAE shell: status, open_solution (solutionPath; closeExisting:true reopens, discardChanges:true closes the current solution WITHOUT saving before reopening), save_all, active_document, selected_items, error_list (default 50, in Error List order; pass limit to widen, severityFilter:'errors'|'warnings' to filter before the cap — count still reports the true matching total), clear_error_list, list_commands (filter regex, limit), dialog_probe (read-only: is a modal dialog blocking XAE right now? returns its title/text/buttons; never clicks anything), dialog_resolve (button, remember) — click a chosen button on the live modal dialog and optionally remember it in the allowlist; pair with dialog_probe. Destructive prompts (activate/restart/download/safety) are refused for auto-remember (the click still happens once).",
+    description: "XAE shell: status, open_solution (solutionPath; closeExisting:true reopens, discardChanges:true closes the current solution WITHOUT saving before reopening), save_all, active_document, selected_items, error_list (default 50, in Error List order; pass limit to widen, severityFilter:'errors'|'warnings' to filter before the cap — count still reports the true matching total), clear_error_list, list_commands (filter regex, limit), dialog_probe (read-only: is a modal dialog blocking XAE right now? returns its title/text/buttons; never clicks anything), dialog_resolve (button, remember) — click a chosen button on the live modal dialog and optionally remember it in the allowlist; pair with dialog_probe. Destructive prompts (activate/restart/download/safety) are refused for auto-remember (the click still happens once). shutdown_ide (save? default true, confirm=\"ALLOW_XAE_SHUTDOWN\") — close the IDE this session drives: settles dirty documents (saved, or discarded with save:false), closes the solution, then Quit(). Attaches only to an already-running IDE, never starts one. Killing the daemon without this leaves devenv orphaned, holding the solution open.",
     inputSchema: {
       action: z.enum(Object.keys(XAE_ACTIONS)),
       solutionPath: z.string().optional(),
@@ -90,9 +93,11 @@ const toolSchemas = {
       discardChanges: z.boolean().optional(),
       filter: z.string().optional(),
       limit: z.number().int().positive().max(5000).optional(),
-      severityFilter: z.enum(["all", "errors", "warnings"]).optional().describe("error_list: filter by severity before the cap (errorLevel values are vsBuildErrorLevelHigh=error / Medium=warning / Low=message); default all"),
+      severityFilter: z.enum(["all", "errors", "warnings"]).optional().describe("error_list: filter by severity before the cap (errorLevel values are vsBuildErrorLevelHigh=error / Medium=warning / Low=message). TwinCAT PLC rows are the exception: the PLC compiler reports errors, warnings and info ALL as Medium, so severity cannot be told apart there -- those rows are kept under any filter and flagged severityUndecidable, with severityUndecidableCount on the response; read the descriptions to tell them apart. Default all"),
       button: z.string().optional(),
       remember: z.boolean().optional(),
+      save: z.boolean().optional().describe("shutdown_ide: save dirty documents before closing (default true); false discards them"),
+      confirm: z.string().optional().describe("shutdown_ide: must equal ALLOW_XAE_SHUTDOWN to close the IDE"),
       mode: z.enum(["active", "activeOrCreate", "create"]).optional().describe("DTE attach mode; default active (open_solution: activeOrCreate)"),
     },
   },
