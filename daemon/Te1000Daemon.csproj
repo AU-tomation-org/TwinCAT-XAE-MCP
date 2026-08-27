@@ -40,9 +40,9 @@
     <XaePublicAssemblies Condition="'$(XaePublicAssemblies)' == '' And Exists('C:\Program Files\Beckhoff\TcXaeShell\Common7\IDE\PublicAssemblies\envdte80.dll')">C:\Program Files\Beckhoff\TcXaeShell\Common7\IDE\PublicAssemblies</XaePublicAssemblies>
     <XaePublicAssemblies Condition="'$(XaePublicAssemblies)' == '' And Exists('C:\Program Files (x86)\Beckhoff\TcXaeShell\Common7\IDE\PublicAssemblies\envdte80.dll')">C:\Program Files (x86)\Beckhoff\TcXaeShell\Common7\IDE\PublicAssemblies</XaePublicAssemblies>
     <!-- Local change (AU-tomation): TE1000 integrated in VS2022, no TcXaeShell. -->
-    <XaePublicAssemblies Condition="'$(XaePublicAssemblies)' == '' And Exists('C:\Program Files\Microsoft Visual Studio\20222\Enterprise\Common7\IDE\PublicAssemblies\envdte80.dll')">C:\Program Files\Microsoft Visual Studio\20222\Enterprise\Common7\IDE\PublicAssemblies</XaePublicAssemblies>
-    <XaePublicAssemblies Condition="'$(XaePublicAssemblies)' == '' And Exists('C:\Program Files\Microsoft Visual Studio\20222\Professional\Common7\IDE\PublicAssemblies\envdte80.dll')">C:\Program Files\Microsoft Visual Studio\20222\Professional\Common7\IDE\PublicAssemblies</XaePublicAssemblies>
-    <XaePublicAssemblies Condition="'$(XaePublicAssemblies)' == '' And Exists('C:\Program Files\Microsoft Visual Studio\20222\Community\Common7\IDE\PublicAssemblies\envdte80.dll')">C:\Program Files\Microsoft Visual Studio\20222\Community\Common7\IDE\PublicAssemblies</XaePublicAssemblies>
+    <XaePublicAssemblies Condition="'$(XaePublicAssemblies)' == '' And Exists('C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\PublicAssemblies\envdte80.dll')">C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\PublicAssemblies</XaePublicAssemblies>
+    <XaePublicAssemblies Condition="'$(XaePublicAssemblies)' == '' And Exists('C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\PublicAssemblies\envdte80.dll')">C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\PublicAssemblies</XaePublicAssemblies>
+    <XaePublicAssemblies Condition="'$(XaePublicAssemblies)' == '' And Exists('C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\PublicAssemblies\envdte80.dll')">C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\PublicAssemblies</XaePublicAssemblies>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|x64' ">
     <DebugSymbols>true</DebugSymbols>
