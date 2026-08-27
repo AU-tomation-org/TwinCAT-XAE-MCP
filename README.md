@@ -4,6 +4,13 @@
 
 # te1000-mcp
 
+> [!NOTE]
+> **This is the AU-tomation fork of [`Edge-JB/TwinCAT-XAE-MCP`](https://github.com/Edge-JB/TwinCAT-XAE-MCP).**
+> What this fork changes, and why, is in **[FORK-NOTES.md](FORK-NOTES.md)** — including
+> support for TE1000 integrated in Visual Studio 2022, a severity filter that works on
+> TwinCAT projects, and an IDE shutdown that leaves no orphaned `devenv` behind.
+> The rest of this README is upstream's and still applies.
+
 > A [Model Context Protocol](https://modelcontextprotocol.io) server for **Beckhoff TwinCAT 3** engineering automation — drive the **TE1000 / XAE Automation Interface** from an AI agent or any MCP client.
 
 [![CI](https://github.com/Edge-JB/TwinCAT-XAE-MCP/actions/workflows/ci.yml/badge.svg)](https://github.com/Edge-JB/TwinCAT-XAE-MCP/actions/workflows/ci.yml)
