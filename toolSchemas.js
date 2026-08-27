@@ -79,13 +79,15 @@ const XAE_ACTIONS = {
   dialog_probe: "dialog_probe",
   dialog_resolve: "dialog_resolve",
   shutdown_ide: "xae_shutdown_ide",
+  list_instances: "xae_list_instances",
+  attach: "xae_attach",
 };
 
 // --- The tool schemas, keyed by tool name. Each entry is the EXACT config object
 // (description + zod inputSchema raw shape) that registerTool consumes. ----------
 const toolSchemas = {
   xae: {
-    description: "XAE shell: status, open_solution (solutionPath; closeExisting:true reopens, discardChanges:true closes the current solution WITHOUT saving before reopening), save_all, active_document, selected_items, error_list (default 50, in Error List order; pass limit to widen, severityFilter:'errors'|'warnings' to filter before the cap — count still reports the true matching total), clear_error_list, list_commands (filter regex, limit), dialog_probe (read-only: is a modal dialog blocking XAE right now? returns its title/text/buttons; never clicks anything), dialog_resolve (button, remember) — click a chosen button on the live modal dialog and optionally remember it in the allowlist; pair with dialog_probe. Destructive prompts (activate/restart/download/safety) are refused for auto-remember (the click still happens once). shutdown_ide (save? default true, confirm=\"ALLOW_XAE_SHUTDOWN\") — close the IDE this session drives: settles dirty documents (saved, or discarded with save:false), closes the solution, then Quit(). Attaches only to an already-running IDE, never starts one. Killing the daemon without this leaves devenv orphaned, holding the solution open.",
+    description: "XAE shell: status, open_solution (solutionPath; closeExisting:true reopens, discardChanges:true closes the current solution WITHOUT saving before reopening), save_all, active_document, selected_items, error_list (default 50, in Error List order; pass limit to widen, severityFilter:'errors'|'warnings' to filter before the cap — count still reports the true matching total), clear_error_list, list_commands (filter regex, limit), dialog_probe (read-only: is a modal dialog blocking XAE right now? returns its title/text/buttons; never clicks anything), dialog_resolve (button, remember) — click a chosen button on the live modal dialog and optionally remember it in the allowlist; pair with dialog_probe. Destructive prompts (activate/restart/download/safety) are refused for auto-remember (the click still happens once). shutdown_ide (save? default true, confirm=\"ALLOW_XAE_SHUTDOWN\") — close the IDE this session drives: settles dirty documents (saved, or discarded with save:false), closes the solution, then Quit(). Attaches only to an already-running IDE, never starts one. Killing the daemon without this leaves devenv orphaned, holding the solution open. list_instances \u2014 every running IDE for this progId with pid, the solution it has open, and which one this session is on; read-only, attaches to nothing and starts nothing. attach (pid | solutionPath) \u2014 bind this session to ONE named instance; a miss is an error listing what IS running, never a fallback to another IDE. The binding sticks for later calls, including tools that expose no mode of their own. Use list_instances then attach instead of relying on mode:\"active\", which means \"whichever instance the ROT happens to list first with a solution open\".",
     inputSchema: {
       action: z.enum(Object.keys(XAE_ACTIONS)),
       solutionPath: z.string().optional(),
@@ -97,6 +99,10 @@ const toolSchemas = {
       button: z.string().optional(),
       remember: z.boolean().optional(),
       save: z.boolean().optional().describe("shutdown_ide: save dirty documents before closing (default true); false discards them"),
+      pid: z.number().int().positive().optional().describe("attach: process id of the IDE to bind to, from list_instances"),
+      attachPid: z.number().int().positive().optional().describe("any action: use the IDE with this pid instead of the mode heuristic; like attach, the session stays bound to it afterwards"),
+      attachSolution: z.string().optional().describe("any action: use the IDE that has this solution open; like attach, the session stays bound to it afterwards"),
+      forceNew: z.boolean().optional().describe("any action: start a brand new IDE for this call, whatever is already running (mode:\"create\" alone reuses the one this session started)"),
       confirm: z.string().optional().describe("shutdown_ide: must equal ALLOW_XAE_SHUTDOWN to close the IDE"),
       mode: z.enum(["active", "activeOrCreate", "create"]).optional().describe("DTE attach mode; default active (open_solution: activeOrCreate)"),
     },

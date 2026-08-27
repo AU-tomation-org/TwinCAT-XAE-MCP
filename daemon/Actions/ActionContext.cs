@@ -26,7 +26,25 @@ namespace Te1000Daemon
             Mode = Payload.Truthy("mode") ? Payload.Str("mode") : "active";
         }
 
-        public dynamic Dte(bool visible = true) { return Session.GetDte(ProgId, Mode, visible); }
+        // An explicit instance target from the payload, or null when the caller did not
+        // name one. attachPid wins over attachSolution when both are present.
+        public ComSession.InstanceRequest Attach
+        {
+            get
+            {
+                int pid = Payload.Has("attachPid") ? Payload.Int("attachPid", 0) : 0;
+                string sln = Payload.Truthy("attachSolution") ? Payload.Str("attachSolution") : null;
+                bool forceNew = Payload.Has("forceNew") && Payload.Bool("forceNew");
+                if (pid <= 0 && string.IsNullOrWhiteSpace(sln) && !forceNew) return null;
+                var t = new ComSession.InstanceRequest();
+                t.Pid = pid;
+                t.SolutionPath = sln;
+                t.ForceNew = forceNew;
+                return t;
+            }
+        }
+
+        public dynamic Dte(bool visible = true) { return Session.GetDte(ProgId, Mode, visible, Attach); }
 
         // Attach to an IDE only if one is already running, whatever Mode says. For the
         // handlers whose whole job is to act on an existing IDE (shutdown), where the
@@ -47,7 +65,7 @@ namespace Te1000Daemon
 
         public dynamic SysManager()
         {
-            Session.GetDte(ProgId, Mode, true);
+            Session.GetDte(ProgId, Mode, true, Attach);
             return Session.GetSysManager();
         }
 

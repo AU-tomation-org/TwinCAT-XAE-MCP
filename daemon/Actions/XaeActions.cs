@@ -26,6 +26,8 @@ namespace Te1000Daemon
             h["xae_save_all"] = XaeSaveAll;
             h["xae_solution_build"] = XaeSolutionBuild;
             h["xae_shutdown_ide"] = XaeShutdownIde;
+            h["xae_list_instances"] = XaeListInstances;
+            h["xae_attach"] = XaeAttach;
         }
 
         // ---- shared helpers (port of bridge helper functions) ----------------
@@ -390,6 +392,69 @@ namespace Te1000Daemon
                 data["severityNote"] = "TwinCAT PLC rows report errors, warnings and info at the same ErrorLevel; rows kept regardless of severityFilter.";
             }
             data["items"] = result.Items;
+            return data;
+        }
+
+        // xae_list_instances -- which IDEs are running, and what each has open.
+        //
+        // Read-only, and deliberately does NOT attach: it must be callable to decide
+        // WHICH instance to work with, so it cannot itself pick one as a side effect.
+        // For that reason it never starts an IDE either -- with none running it returns
+        // an empty list, not a freshly created shell.
+        private static Json.JObj XaeListInstances(ActionContext ctx)
+        {
+            var instances = ctx.Session.ListInstances(ctx.ProgId);
+
+            var arr = new Json.JArr();
+            foreach (var i in instances)
+            {
+                var o = new Json.JObj();
+                o["pid"] = i.Pid;
+                o["displayName"] = i.DisplayName;
+                o["solution"] = string.IsNullOrWhiteSpace(i.Solution) ? null : i.Solution;
+                o["hasSolution"] = !string.IsNullOrWhiteSpace(i.Solution);
+                o["isCurrent"] = i.IsCurrent;
+                o["startedByUs"] = i.OwnedByUs;
+                arr.Add(o);
+            }
+
+            var data = new Json.JObj();
+            data["progId"] = ctx.ProgId;
+            data["count"] = arr.Count;
+            data["instances"] = arr;
+            return data;
+        }
+
+        // xae_attach -- bind this session to ONE named instance, by pid or by the
+        // solution it has open.
+        //
+        // Without this the only lever was `mode`, and mode:"active" means "whichever
+        // instance the ROT lists first that has any solution open" -- an ordering the
+        // caller does not control and cannot see. Pair it with list_instances: look,
+        // then choose. The binding sticks, because the COM session is cached, so every
+        // later call -- including the tools that expose no mode of their own, xae_build
+        // among them -- runs against the instance chosen here.
+        private static Json.JObj XaeAttach(ActionContext ctx)
+        {
+            int pid = ctx.Payload.Has("pid") ? ctx.Payload.Int("pid", 0) : 0;
+            string solutionPath = ctx.Payload.Truthy("solutionPath") ? ctx.Payload.Str("solutionPath") : null;
+            if (pid <= 0 && string.IsNullOrWhiteSpace(solutionPath))
+                throw new BridgeException("attach requires pid or solutionPath");
+
+            var target = new ComSession.InstanceRequest();
+            target.Pid = pid;
+            target.SolutionPath = solutionPath;
+
+            // Mode is irrelevant with an explicit target -- AcquireDte rejects a miss
+            // rather than falling back -- but pass "active" so nothing can create one.
+            dynamic dte = ctx.Session.GetDte(ctx.ProgId, "active", true, target);
+
+            var data = new Json.JObj();
+            data["progId"] = ctx.ProgId;
+            data["attached"] = true;
+            data["pid"] = ctx.Session.CurrentPid;
+            data["startedByUs"] = ctx.Session.OwnedByUs;
+            data["solution"] = GetSolutionInfo(dte);
             return data;
         }
 

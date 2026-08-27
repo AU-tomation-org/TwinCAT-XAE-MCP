@@ -17,7 +17,19 @@ namespace Te1000Daemon
         private string _mode;
         private bool _stale;
 
-        public void MarkStale() { _stale = true; _dte = null; _sysManager = null; }
+        // Identity of the IDE currently attached, so a caller can be told which one it
+        // got and so a request for a DIFFERENT one is not silently served the cached
+        // instance. _currentPid is 0 when the identity could not be resolved -- in which
+        // case a pid-targeted request never matches and we reattach, which is the safe
+        // direction to fail.
+        private int _currentPid;
+        private string _currentMoniker;
+        private bool _ownedByUs;
+
+        public int CurrentPid { get { return _currentPid; } }
+        public bool OwnedByUs { get { return _ownedByUs; } }
+
+        public void MarkStale() { _stale = true; _dte = null; _sysManager = null; _currentPid = 0; _currentMoniker = null; _ownedByUs = false; }
 
         // Best-effort release of a COM RCW. Guards against already-released RCWs
         // and non-COM objects (Marshal.ReleaseComObject throws ArgumentException
@@ -39,21 +51,66 @@ namespace Te1000Daemon
         // Return a live, cached DTE for (progId, mode); reconnect if stale/dead.
         public dynamic GetDte(string progId, string mode, bool visible = true)
         {
+            return GetDte(progId, mode, visible, null);
+        }
+
+        // Same, with an optional explicit target: attach.Pid or attach.SolutionPath
+        // names WHICH running IDE to work with.
+        //
+        // The cache used to key on progId alone, so once a DTE was attached every later
+        // call got that one back whatever it asked for: `mode` was documented per-call
+        // but behaved per-session, and a request for a different instance was answered
+        // with the current one. Now the cached instance is reused only when it actually
+        // SATISFIES the request (see SatisfiesRequest), and otherwise we reattach.
+        public dynamic GetDte(string progId, string mode, bool visible, InstanceRequest attach)
+        {
             if (string.IsNullOrWhiteSpace(progId)) progId = "TcXaeShell.DTE.17.0";
             if (string.IsNullOrWhiteSpace(mode)) mode = "active";
 
             if (_dte != null && !_stale && _progId == progId)
             {
-                if (IsDteAlive(_dte)) return _dte;
-                _dte = null; _sysManager = null;
+                if (IsDteAlive(_dte) && SatisfiesRequest(mode, attach)) return _dte;
+                // Either dead, or alive but not what was asked for. Drop the reference
+                // WITHOUT releasing: SafeRelease drives the RCW ref count to zero, and
+                // the CLR hands out the SAME RCW for a given COM identity -- so releasing
+                // it here would tear down an object the very next ROT walk may return.
+                // Let the GC reclaim it instead.
+                _dte = null; _sysManager = null; _currentPid = 0; _currentMoniker = null;
+                _ownedByUs = false;
             }
 
-            _dte = AcquireDte(progId, mode, visible);
+            bool created;
+            _dte = AcquireDte(progId, mode, visible, attach, out created);
             _progId = progId;
             _mode = mode;
             _sysManager = null;
             _stale = false;
+            _ownedByUs = created;
+            ResolveCurrentIdentity(progId);
             return _dte;
+        }
+
+        // Does the instance we already hold answer this request?
+        //  - a pid target: only that exact process;
+        //  - a solution target: the solution it has open right now (read live, because
+        //    an IDE can be made to open a different one);
+        //  - mode "create": only an IDE we created ourselves, so repeated create calls
+        //    reuse OUR instance instead of spawning one per call;
+        //  - otherwise: anything live will do, which is the old behaviour.
+        private bool SatisfiesRequest(string mode, InstanceRequest attach)
+        {
+            // "give me a new one" can never be answered with the one already held.
+            if (attach != null && attach.ForceNew) return false;
+            if (attach != null && attach.Pid > 0) return _currentPid == attach.Pid;
+            if (attach != null && !string.IsNullOrWhiteSpace(attach.SolutionPath))
+            {
+                string open = null;
+                try { open = _dte.Solution != null ? (string)_dte.Solution.FullName : null; }
+                catch { open = null; }
+                return PathUtil.SamePath(open, attach.SolutionPath);
+            }
+            if (mode == "create") return _ownedByUs;
+            return true;
         }
 
         private static bool IsDteAlive(dynamic dte)
@@ -63,8 +120,33 @@ namespace Te1000Daemon
         }
 
         // Get-Dte (L533-579): modes active / create / activeOrCreate.
-        private dynamic AcquireDte(string progId, string mode, bool visible)
+        // `created` reports whether this call started the IDE (as opposed to attaching
+        // to one that was already running) -- the difference decides whether we may
+        // release its RCW and whether a later mode:"create" can reuse it.
+        private dynamic AcquireDte(string progId, string mode, bool visible, InstanceRequest attach, out bool created)
         {
+            created = false;
+
+            // An explicit target overrides the mode heuristics entirely: the caller has
+            // named the instance, so either it is there or this is an error. Falling back
+            // to "some other IDE" would be the very silent mis-attach this exists to stop.
+            if (attach != null && attach.NamesExisting)
+            {
+                dynamic targeted = AttachToTarget(progId, attach);
+                if (targeted == null) throw new BridgeException(DescribeMissingTarget(progId, attach));
+                return targeted;
+            }
+
+            // An unconditional new instance, whatever is already running and whatever
+            // this session is currently attached to. Without it, mode:"create" reuses
+            // an IDE we started (so that passing create on every call does not spawn one
+            // per call), which leaves no way to ask for a SECOND instance on purpose.
+            if (attach != null && attach.ForceNew)
+            {
+                created = true;
+                return CreateDte(progId, visible);
+            }
+
             switch (mode)
             {
                 case "active":
@@ -74,6 +156,7 @@ namespace Te1000Daemon
                     return Marshal.GetActiveObject(progId);
                 }
                 case "create":
+                    created = true;
                     return CreateDte(progId, visible);
                 case "activeOrCreate":
                     try
@@ -84,11 +167,99 @@ namespace Te1000Daemon
                     }
                     catch
                     {
+                        created = true;
                         return CreateDte(progId, visible);
                     }
                 default:
                     throw new BridgeException("Unsupported DTE mode: " + mode);
             }
+        }
+
+        // Find the one running IDE the caller named. Returns null if there is no match.
+        private dynamic AttachToTarget(string progId, InstanceRequest attach)
+        {
+            var entries = ListRunningDte(progId);
+            RotEntry chosen = null;
+            foreach (var e in entries)
+            {
+                bool hit;
+                if (attach.Pid > 0) hit = (PidFromMoniker(e.DisplayName) == attach.Pid);
+                else hit = PathUtil.SamePath(e.Solution, attach.SolutionPath);
+                if (hit) { chosen = e; break; }
+            }
+            foreach (var e in entries)
+                if (!ReferenceEquals(e, chosen)) SafeRelease((object)e.Dte);
+            return chosen == null ? null : chosen.Dte;
+        }
+
+        // Name what WAS running, so a failed attach says which instances exist instead of
+        // just reporting that the wanted one does not.
+        private string DescribeMissingTarget(string progId, InstanceRequest attach)
+        {
+            string wanted = attach.Pid > 0
+                ? "pid " + attach.Pid.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : "solution '" + attach.SolutionPath + "'";
+            var running = new List<string>();
+            try
+            {
+                foreach (var i in ListInstances(progId))
+                {
+                    running.Add("pid " + i.Pid.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                                (string.IsNullOrWhiteSpace(i.Solution) ? " (no solution)" : " -> " + i.Solution));
+                }
+            }
+            catch { }
+            string list = running.Count == 0 ? "none" : string.Join("; ", running.ToArray());
+            return "No running " + progId + " instance matches " + wanted + ". Running: " + list +
+                   ". Use xae list_instances to see them, or mode:\"create\" to start a new one.";
+        }
+
+        // The ROT display name for a DTE is "!VisualStudio.DTE.17.0:<pid>". Returns 0
+        // when it does not end in a pid.
+        private static int PidFromMoniker(string displayName)
+        {
+            if (string.IsNullOrWhiteSpace(displayName)) return 0;
+            int colon = displayName.LastIndexOf(':');
+            if (colon < 0 || colon == displayName.Length - 1) return 0;
+            int pid;
+            if (!int.TryParse(displayName.Substring(colon + 1), out pid)) return 0;
+            return pid;
+        }
+
+        // After acquiring, work out WHICH process we ended up on by finding our own DTE
+        // back in the ROT by COM identity. A freshly created instance has no moniker of
+        // its own to hand us, so this is also how a created IDE gets its pid.
+        private void ResolveCurrentIdentity(string progId)
+        {
+            _currentPid = 0;
+            _currentMoniker = null;
+            if (_dte == null) return;
+            IntPtr mine = IntPtr.Zero;
+            try
+            {
+                mine = Marshal.GetIUnknownForObject((object)_dte);
+                var entries = ListRunningDte(progId);
+                foreach (var e in entries)
+                {
+                    IntPtr theirs = IntPtr.Zero;
+                    try
+                    {
+                        theirs = Marshal.GetIUnknownForObject((object)e.Dte);
+                        if (theirs == mine)
+                        {
+                            _currentMoniker = e.DisplayName;
+                            _currentPid = PidFromMoniker(e.DisplayName);
+                        }
+                    }
+                    catch { }
+                    finally { if (theirs != IntPtr.Zero) Marshal.Release(theirs); }
+                    // Releasing the entry that IS our own DTE would destroy the shared
+                    // RCW we just acquired -- same object, same RCW.
+                    if (!ReferenceEquals((object)e.Dte, (object)_dte)) SafeRelease((object)e.Dte);
+                }
+            }
+            catch { }
+            finally { if (mine != IntPtr.Zero) Marshal.Release(mine); }
         }
 
         private dynamic CreateDte(string progId, bool visible)
@@ -133,6 +304,82 @@ namespace Te1000Daemon
         }
 
         private sealed class RotEntry { public string DisplayName; public string Solution; public dynamic Dte; }
+
+        // Which IDE this call wants. Either an existing one -- named by Pid (which wins
+        // when both are set) or by the SolutionPath it has open -- or, with ForceNew, a
+        // brand new one regardless of what is already running.
+        public sealed class InstanceRequest
+        {
+            public int Pid;
+            public string SolutionPath;
+            public bool ForceNew;
+
+            public bool NamesExisting
+            {
+                get { return Pid > 0 || !string.IsNullOrWhiteSpace(SolutionPath); }
+            }
+        }
+
+        // One running IDE, as reported to the caller.
+        public sealed class InstanceInfo
+        {
+            public int Pid;
+            public string DisplayName;
+            public string Solution;
+            public bool IsCurrent;
+            public bool OwnedByUs;
+        }
+
+        // Every running IDE for this progId, with the solution each has open.
+        //
+        // The ROT walk already read exactly this to pick an instance by heuristic; it was
+        // used internally and thrown away. Handing it to the caller is what lets an agent
+        // SEE what is running and choose, instead of hoping the heuristic picks the same
+        // one it had in mind. Releases every DTE it touches: this is a read, not an attach.
+        public List<InstanceInfo> ListInstances(string progId)
+        {
+            if (string.IsNullOrWhiteSpace(progId)) progId = "TcXaeShell.DTE.17.0";
+            var result = new List<InstanceInfo>();
+
+            IntPtr mine = IntPtr.Zero;
+            try
+            {
+                if (_dte != null && !_stale)
+                {
+                    try { mine = Marshal.GetIUnknownForObject((object)_dte); }
+                    catch { mine = IntPtr.Zero; }
+                }
+
+                foreach (var e in ListRunningDte(progId))
+                {
+                    var info = new InstanceInfo();
+                    info.DisplayName = e.DisplayName;
+                    info.Pid = PidFromMoniker(e.DisplayName);
+                    info.Solution = e.Solution;
+
+                    if (mine != IntPtr.Zero)
+                    {
+                        IntPtr theirs = IntPtr.Zero;
+                        try
+                        {
+                            theirs = Marshal.GetIUnknownForObject((object)e.Dte);
+                            info.IsCurrent = (theirs == mine);
+                        }
+                        catch { }
+                        finally { if (theirs != IntPtr.Zero) Marshal.Release(theirs); }
+                    }
+                    info.OwnedByUs = info.IsCurrent && _ownedByUs;
+
+                    result.Add(info);
+                    // Same rule as ResolveCurrentIdentity: this is a read, so release
+                    // every instance we touched EXCEPT the one this session is using.
+                    if (!info.IsCurrent) SafeRelease((object)e.Dte);
+                }
+            }
+            finally { if (mine != IntPtr.Zero) Marshal.Release(mine); }
+
+            return result;
+        }
 
         [DllImport("ole32.dll")] private static extern int GetRunningObjectTable(int reserved, out IRunningObjectTable prot);
         [DllImport("ole32.dll")] private static extern int CreateBindCtx(int reserved, out IBindCtx ppbc);

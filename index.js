@@ -80,22 +80,22 @@ function sessionCall(mode) {
   });
 }
 
-// TE1000_MODE — an environment default for the per-call `mode`, the companion of
+// TE1000_DEFAULT_MODE — an environment default for the per-call `mode`, the companion of
 // TE1000_PROGID above. Without it `mode` defaults to "active" on nearly every
 // tool, and "active" attaches to whichever running IDE the ROT hands over first
 // that has ANY solution open (ComSession.GetPreferredDteFromRot) — so on a machine
 // where someone is working in Visual Studio, an unqualified call reaches THEIR IDE
 // and builds THEIR solution. Some tools (xae_build among them) expose no mode
 // parameter at all, so per-call discipline cannot cover every path; only a default
-// applied here can. Set TE1000_MODE=create to keep a session on its own instance.
+// applied here can. Set TE1000_DEFAULT_MODE=create to keep a session on its own instance.
 //
 // An explicit per-call mode always wins, and open_solution keeps its own
 // activeOrCreate default (set in the xae handler) — this only fills the gap where
 // no mode was chosen at all.
 const VALID_MODES = ["active", "activeOrCreate", "create"];
-const ENV_MODE = VALID_MODES.includes(process.env.TE1000_MODE) ? process.env.TE1000_MODE : null;
-if (process.env.TE1000_MODE && !ENV_MODE) {
-  console.error(`te1000-mcp: ignoring TE1000_MODE="${process.env.TE1000_MODE}" (expected one of ${VALID_MODES.join(", ")})`);
+const ENV_MODE = VALID_MODES.includes(process.env.TE1000_DEFAULT_MODE) ? process.env.TE1000_DEFAULT_MODE : null;
+if (process.env.TE1000_DEFAULT_MODE && !ENV_MODE) {
+  console.error(`te1000-mcp: ignoring TE1000_DEFAULT_MODE="${process.env.TE1000_DEFAULT_MODE}" (expected one of ${VALID_MODES.join(", ")})`);
 }
 
 async function bridgeCall(action, payload = {}) {
@@ -218,8 +218,12 @@ function buildServer() {
 server.registerTool(
   "xae",
   toolSchemas.xae,
-  async ({ action, solutionPath, closeExisting, discardChanges, filter, limit, severityFilter, button, remember, save, confirm, mode }) => {
-    const payload = { mode };
+  async ({ action, solutionPath, closeExisting, discardChanges, filter, limit, severityFilter, button, remember, save, confirm, pid, attachPid, attachSolution, forceNew, mode }) => {
+    const payload = { mode, attachPid, attachSolution, forceNew };
+    if (action === "attach") {
+      if (!pid && !solutionPath) throw new Error("attach requires pid or solutionPath (use list_instances to see what is running).");
+      Object.assign(payload, { pid, solutionPath });
+    }
     if (action === "shutdown_ide") {
       if (confirm !== IDE_SHUTDOWN_CONFIRMATION) {
         throw new Error(`Blocked. shutdown_ide closes the running XAE/VS instance. Re-run with confirm="${IDE_SHUTDOWN_CONFIRMATION}" to proceed.`);

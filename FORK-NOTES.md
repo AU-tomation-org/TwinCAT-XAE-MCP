@@ -108,7 +108,7 @@ They now walk the same candidate order `plc_pou_check_objects` already used and
 QI-probe each node, so the right one is chosen before the write instead of being
 discovered through a failure mid-write.
 
-### 6. `TE1000_MODE` — an environment default for `mode`
+### 6. `TE1000_DEFAULT_MODE` — an environment default for `mode`
 
 `mode` is a **per-call** parameter defaulting to `active`, and `active` attaches to
 whichever running IDE the ROT offers first that has any solution open
@@ -117,8 +117,37 @@ Studio, an unqualified call therefore reaches **their** IDE and builds **their**
 solution. Some tools — `xae_build` among them — expose no `mode` parameter at all, so
 per-call discipline cannot cover every path.
 
-`TE1000_MODE` is the companion of the existing `TE1000_PROGID`. Set it to `create` to
+`TE1000_DEFAULT_MODE` is the companion of the existing `TE1000_PROGID`. Set it to `create` to
 keep a session on its own instance. An explicit per-call `mode` still wins.
+
+### 7. Choosing which IDE to work with
+
+`mode` decides *how* to get an IDE (`create` / `active` / `activeOrCreate`). It cannot say
+*which* one. `active` means "whichever instance the ROT lists first that has any solution
+open" — an ordering the caller neither controls nor sees. With two IDEs running, which
+one a build lands on was luck.
+
+Worse, `mode` was per-call only on paper: the session cache keyed on `progId` alone, so
+once a DTE was attached every later call got that one back whatever it asked for. A
+`mode:"create"` passed mid-session returned the existing instance instead of starting one.
+
+Three changes, which together make the choice explicit:
+
+- **`xae list_instances`** — every running IDE for this progId: `pid`, the `solution` it
+  has open, whether it is the one this session is on (`isCurrent`) and whether this
+  session started it (`startedByUs`). Read-only: it attaches to nothing and starts
+  nothing, because it has to be safe to call *in order to decide*. The ROT walk already
+  collected exactly this to run its heuristic and then discarded it.
+- **`xae attach` (`pid` | `solutionPath`)** — bind the session to one named instance. A
+  miss is an **error that lists what is running**, never a quiet fallback to a different
+  IDE. Per-call `attachPid` / `attachSolution` do the same for a single call. The binding
+  sticks, so the tools that expose no `mode` of their own — `xae_build` among them — run
+  against the instance you chose.
+- **The cache now honours the request.** A held instance is reused only when it actually
+  satisfies what was asked (right pid, right solution, and for `mode:"create"`, an IDE
+  this session started). `forceNew:true` starts an additional instance unconditionally —
+  `create` alone deliberately reuses ours, so that passing it on every call does not spawn
+  one IDE per call.
 
 ---
 
@@ -135,6 +164,10 @@ keep a session on its own instance. An explicit per-call `mode` still wins.
 - **`install_library` names the artifact after the file on disk.** Installing an export
   called `Foo_from_mcp.library` leaves the repository version folder holding that name
   instead of `Foo.library`. Name the exported file exactly as the library.
+- **An IDE started through automation dies when you let go of it.** Instances created by
+  the daemon shut down once the last COM reference is dropped — attach elsewhere and the
+  one you started disappears. IDEs a person opened are unaffected; only ours are this
+  short-lived. Use `list_instances` to see what actually survived rather than assuming.
 - **The `ALLOW_*` tokens are not a human gate.** They are parameters the agent writes
   itself, enforced in `index.js`. The real gate is the MCP client's own permission
   prompt.
