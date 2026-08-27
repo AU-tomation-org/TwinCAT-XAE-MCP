@@ -95,6 +95,20 @@ namespace Te1000Daemon
             ((ITcPlcIECProject)iecProject).PlcOpenImport(file, options, selection, folderStructure);
         }
 
+        // Does this node implement ITcPlcIECProject? A QI probe, so a caller can pick
+        // the right node BEFORE performing an operation, instead of discovering the
+        // wrong one through an E_NOINTERFACE thrown mid-write.
+        public static bool IsIecProject(object treeItem)
+        {
+            if (treeItem == null) return false;
+            try
+            {
+                ITcPlcIECProject typed = (ITcPlcIECProject)treeItem;
+                return typed != null;
+            }
+            catch { return false; }
+        }
+
         public static void SaveAsLibrary(object iecProject, string file, bool install)
         {
             ((ITcPlcIECProject)iecProject).SaveAsLibrary(file, install);

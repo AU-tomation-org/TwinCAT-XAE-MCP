@@ -221,7 +221,7 @@ namespace Te1000Daemon
             string selection = ctx.Payload.Truthy("selection") ? ctx.Payload.Str("selection") : "";
 
             dynamic sm = ctx.SysManager();
-            string treePath = ResolvePlcRootPath(ctx, sm, ctx.Payload.Str("treePath"));
+            string treePath = ResolveIecProjectPath(ctx, sm, ctx.Payload.Str("treePath"));
             dynamic item = ComHelpers.GetTreeItem(sm, treePath);
 
             try
@@ -259,7 +259,7 @@ namespace Te1000Daemon
             if (ctx.Payload.Has("folderStructure")) folderStructure = ctx.Payload.Bool("folderStructure");
 
             dynamic sm = ctx.SysManager();
-            string treePath = ResolvePlcRootPath(ctx, sm, ctx.Payload.Str("treePath"));
+            string treePath = ResolveIecProjectPath(ctx, sm, ctx.Payload.Str("treePath"));
             dynamic item = ComHelpers.GetTreeItem(sm, treePath);
 
             try
@@ -296,7 +296,7 @@ namespace Te1000Daemon
             if (ctx.Payload.Has("install")) install = ctx.Payload.Bool("install");
 
             dynamic sm = ctx.SysManager();
-            string treePath = ResolvePlcRootPath(ctx, sm, ctx.Payload.Str("treePath"));
+            string treePath = ResolveIecProjectPath(ctx, sm, ctx.Payload.Str("treePath"));
             dynamic item = ComHelpers.GetTreeItem(sm, treePath);
 
             try
@@ -323,6 +323,55 @@ namespace Te1000Daemon
         // Resolve-PlcRootPath (L1164-1177): if a path is supplied use it as-is;
         // otherwise default to TIPC^<firstChildName>, throwing if no PLC project
         // exists under TIPC.
+        // Resolve the node that implements ITcPlcIECProject -- the nested project
+        // INSTANCE node, not the PLC ROOT.
+        //
+        // plcopen_export, plcopen_import and save_as_library all need the INSTANCE, but
+        // all three defaulted to ResolvePlcRootPath, i.e. the ROOT. With no treePath the
+        // three of them failed with a bare E_NOINTERFACE until the caller knew to pass
+        // "TIPC^<name>^<name> Project" by hand -- a default that could never work.
+        //
+        // The candidate order is the one plc_pou_check_objects already uses: the
+        // conventional "<name> Project" child first, then the root's other children,
+        // then the root itself. An explicit treePath is honoured untouched, so a caller
+        // who already passes the instance node is unaffected.
+        private static string ResolveIecProjectPath(ActionContext ctx, dynamic sm, string path)
+        {
+            if (!string.IsNullOrWhiteSpace(path)) return path;
+
+            string rootPath = ResolvePlcRootPath(ctx, sm, null);
+            dynamic root = ComHelpers.GetTreeItem(sm, rootPath);
+            string rootName = ComHelpers.SafeStr(delegate { return root.Name; });
+
+            var candidates = new List<string>();
+            if (!string.IsNullOrWhiteSpace(rootName)) candidates.Add(rootPath + "^" + rootName + " Project");
+            int childCount = ComHelpers.ChildCount(root);
+            for (int i = 1; i <= childCount; i++)
+            {
+                dynamic child = ComHelpers.Child(root, i);
+                if (child == null) continue;
+                string cn = ComHelpers.SafeStr(delegate { return child.Name; });
+                if (string.IsNullOrWhiteSpace(cn)) continue;
+                string cp = rootPath + "^" + cn;
+                if (!candidates.Contains(cp)) candidates.Add(cp);
+            }
+            if (!candidates.Contains(rootPath)) candidates.Add(rootPath);
+
+            foreach (string cand in candidates)
+            {
+                try
+                {
+                    dynamic node = ComHelpers.GetTreeItem(sm, cand);
+                    if (PlcProjectHelper.IsIecProject((object)node)) return cand;
+                }
+                catch { }
+            }
+
+            // Nothing implemented it. Return the root so the caller's own error message
+            // still names a real node instead of this resolver throwing something vaguer.
+            return rootPath;
+        }
+
         private static string ResolvePlcRootPath(ActionContext ctx, dynamic sm, string path)
         {
             if (!string.IsNullOrWhiteSpace(path)) return path;
