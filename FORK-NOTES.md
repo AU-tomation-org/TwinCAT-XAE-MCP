@@ -176,6 +176,9 @@ Three changes, which together make the choice explicit:
 
 ## Still to do
 
+The working list — rough edges hit in real use, missing capabilities in order of value,
+and what is deliberately out of scope — lives in [BACKLOG.md](BACKLOG.md). The summary:
+
 - Send each fix above upstream as its own PR.
 - Add what our CI needs and this server does not have yet: running the TcUnit suite
   (without the runtime restart other servers do), `RunStaticAnalysis()` +
