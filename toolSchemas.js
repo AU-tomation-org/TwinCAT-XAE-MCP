@@ -81,13 +81,28 @@ const XAE_ACTIONS = {
   shutdown_ide: "xae_shutdown_ide",
   list_instances: "xae_list_instances",
   attach: "xae_attach",
+  list_projects: "xae_list_projects",
+  select_project: "xae_select_project",
+  list_configurations: "xae_list_configurations",
+  set_configuration: "xae_set_configuration",
 };
+
+// Tools that reach a TwinCAT project's system manager, and therefore take
+// `tsProject` to name WHICH project of the solution to work on. The parameter is
+// added to each schema below in one pass, and index.js forwards it for every tool
+// without each handler having to thread it through (see callScope there).
+const PROJECT_SCOPED_TOOLS = [
+  "xae", "xae_build", "tc_tree", "tc_ethercat", "tc_link", "tc_system", "tc_mapping",
+  "nc", "tc_task", "plc_download", "plc_project", "plc_pou", "plc_library",
+  "tc_route", "tc_settings", "tc_fieldbus", "tc_module", "tc_cpp", "tc_measurement",
+  "tc_license", "tc_variant", "twincat_activate_configuration", "twincat_restart_runtime",
+];
 
 // --- The tool schemas, keyed by tool name. Each entry is the EXACT config object
 // (description + zod inputSchema raw shape) that registerTool consumes. ----------
 const toolSchemas = {
   xae: {
-    description: "XAE shell: status, open_solution (solutionPath; closeExisting:true reopens, discardChanges:true closes the current solution WITHOUT saving before reopening), save_all, active_document, selected_items, error_list (default 50, in Error List order; pass limit to widen, severityFilter:'errors'|'warnings' to filter before the cap — count still reports the true matching total), clear_error_list, list_commands (filter regex, limit), dialog_probe (read-only: is a modal dialog blocking XAE right now? returns its title/text/buttons; never clicks anything), dialog_resolve (button, remember) — click a chosen button on the live modal dialog and optionally remember it in the allowlist; pair with dialog_probe. Destructive prompts (activate/restart/download/safety) are refused for auto-remember (the click still happens once). shutdown_ide (save? default true, confirm=\"ALLOW_XAE_SHUTDOWN\") — close the IDE this session drives: settles dirty documents (saved, or discarded with save:false), closes the solution, then Quit(). Attaches only to an already-running IDE, never starts one. Killing the daemon without this leaves devenv orphaned, holding the solution open. list_instances \u2014 every running IDE for this progId with pid, the solution it has open, and which one this session is on; read-only, attaches to nothing and starts nothing. attach (pid | solutionPath) \u2014 bind this session to ONE named instance; a miss is an error listing what IS running, never a fallback to another IDE. The binding sticks for later calls, including tools that expose no mode of their own. Use list_instances then attach instead of relying on mode:\"active\", which means \"whichever instance the ROT happens to list first with a solution open\".",
+    description: "XAE shell: status, open_solution (solutionPath; closeExisting:true reopens, discardChanges:true closes the current solution WITHOUT saving before reopening), save_all, active_document, selected_items, error_list (default 50, in Error List order; pass limit to widen, severityFilter:'errors'|'warnings' to filter before the cap — count still reports the true matching total), clear_error_list, list_commands (filter regex, limit), dialog_probe (read-only: is a modal dialog blocking XAE right now? returns its title/text/buttons; never clicks anything), dialog_resolve (button, remember) — click a chosen button on the live modal dialog and optionally remember it in the allowlist; pair with dialog_probe. Destructive prompts (activate/restart/download/safety) are refused for auto-remember (the click still happens once). shutdown_ide (save? default true, confirm=\"ALLOW_XAE_SHUTDOWN\") — close the IDE this session drives: settles dirty documents (saved, or discarded with save:false), closes the solution, then Quit(). Attaches only to an already-running IDE, never starts one. Killing the daemon without this leaves devenv orphaned, holding the solution open. list_instances \u2014 every running IDE for this progId with pid, the solution it has open, and which one this session is on; read-only, attaches to nothing and starts nothing. attach (pid | solutionPath) \u2014 bind this session to ONE named instance; a miss is an error listing what IS running, never a fallback to another IDE. The binding sticks for later calls, including tools that expose no mode of their own. Use list_instances then attach instead of relying on mode:\"active\", which means \"whichever instance the ROT happens to list first with a solution open\". list_projects — the TwinCAT projects (.tsproj) of the open solution with name, path, TargetNetId and PLC-project count, and which one is bound; read-only. select_project (name | path) — bind the session to ONE of them, the same contract as attach one level down: a miss lists what IS there, and the binding sticks for later calls. It matters because a solution holds one system manager PER project (tree, target NetId, boot flags, activation): with several present and none chosen, reads answer from the first in solution order and are flagged tsProjectAmbiguous, while the actions that change the target (activate, restart, boot flags, download, set_netid) refuse until one is named. Any tool may also name it per call with tsProject. list_configurations — the solution configurations and which is active; set_configuration (name, platform?) activates one, e.g. \"Release|TwinCAT OS (x64)\" — xae_build builds the ACTIVE configuration, so a solution left on another platform yields a verdict that differs from CI's for no visible reason.",
     inputSchema: {
       action: z.enum(Object.keys(XAE_ACTIONS)),
       solutionPath: z.string().optional(),
@@ -100,6 +115,9 @@ const toolSchemas = {
       remember: z.boolean().optional(),
       save: z.boolean().optional().describe("shutdown_ide: save dirty documents before closing (default true); false discards them"),
       pid: z.number().int().positive().optional().describe("attach: process id of the IDE to bind to, from list_instances"),
+      name: z.string().optional().describe("select_project: project name (or the .tsproj filename without extension), from list_projects. set_configuration: configuration name, e.g. \"Release\" or \"Release|TwinCAT OS (x64)\""),
+      path: z.string().optional().describe("select_project: full path of the .tsproj to bind to, from list_projects"),
+      platform: z.string().optional().describe("set_configuration: platform of the configuration to activate, e.g. \"TwinCAT OS (x64)\"; may instead be given inside name after a |"),
       attachPid: z.number().int().positive().optional().describe("any action: use the IDE with this pid instead of the mode heuristic; like attach, the session stays bound to it afterwards"),
       attachSolution: z.string().optional().describe("any action: use the IDE that has this solution open; like attach, the session stays bound to it afterwards"),
       forceNew: z.boolean().optional().describe("any action: start a brand new IDE for this call, whatever is already running (mode:\"create\" alone reuses the one this session started)"),
@@ -109,9 +127,11 @@ const toolSchemas = {
   },
 
   xae_build: {
-    description: "Clean/Build/Rebuild the active solution configuration; waits for completion by default.",
+    description: "Clean/Build/Rebuild the active solution configuration; waits for completion by default. The response reports the configuration it built, since that is what decides whether the verdict matches CI's (see xae list_configurations / set_configuration). project (name, UniqueName or .tsproj path) builds ONE project of the solution instead of all of it — build only: EnvDTE has no per-project clean or rebuild. configuration overrides the active one for that single-project build.",
     inputSchema: {
       action: z.enum(["clean", "build", "rebuild"]),
+      project: z.string().optional().describe("build one project of the solution instead of the whole solution; name, UniqueName or .tsproj path (see xae list_projects)"),
+      configuration: z.string().optional().describe("with project: the solution configuration to build it in, e.g. \"Release|TwinCAT OS (x64)\"; default is the active one"),
       waitForFinish: z.boolean().default(true),
       timeoutMs: z.number().int().positive().max(3600000).default(1800000),
     },
@@ -687,6 +707,24 @@ const toolSchemas = {
     inputSchema: { confirm: z.string() },
   },
 };
+
+// Which TwinCAT project of the solution the call works on. Declared in one place
+// for every project-scoped tool: the alternative is a per-tool parameter that
+// drifts, and a caller that has to remember which tools learned about it.
+//
+// Two guarded verbs already spell out what a wrong project costs, so they say it
+// here too rather than in a generic sentence.
+const TS_PROJECT_DESCRIPTION =
+  "Which TwinCAT project (.tsproj) of the solution to work on: its name or its path, from xae list_projects. " +
+  "A solution holds one system manager PER project — tree, target NetId, boot flags, activation all hang off it — " +
+  "so with several open and none named the answer comes from the first in solution order (flagged tsProjectAmbiguous on the response). " +
+  "Omit it to use the session's chosen project (xae select_project), which is the better way when every call in a row targets the same one.";
+
+for (const name of PROJECT_SCOPED_TOOLS) {
+  const schema = toolSchemas[name];
+  if (!schema || schema.inputSchema.tsProject) continue;
+  schema.inputSchema.tsProject = z.string().optional().describe(TS_PROJECT_DESCRIPTION);
+}
 
 // SDK v2 wants a real ZodObject per tool (raw shapes are a deprecated,
 // auto-wrapped overload). One wrap here covers every entry and adds nothing to

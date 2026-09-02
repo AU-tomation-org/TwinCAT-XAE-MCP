@@ -481,7 +481,7 @@ namespace Te1000Daemon
             }
 
             ctx.Dte(true);
-            dynamic sysManager = ctx.SysManager();
+            dynamic sysManager = ctx.SysManagerForTargetAction();
             string prev;
             try
             {

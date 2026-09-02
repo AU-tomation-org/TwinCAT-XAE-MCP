@@ -93,32 +93,20 @@ it there. See missing capability 3.
 
 ## Missing capabilities, most valuable first
 
-### 1. Choose WHICH TwinCAT project in the solution
+### 1. ~~Choose WHICH TwinCAT project in the solution~~ — DONE
 
-The daemon works on the first `.tsproj` of the solution. Every AU-tomation repo holds
-two — the library and its TcUnit suite — and the library comes first, so the tools land
-on the wrong one: `tc_system get_netid` answers with the **local** NetId because only the
-test project carries a `TargetNetId`, and `plc_project` / `set_boot_flags` /
-`twincat_activate_configuration` all target the project that has no task to run.
+Shipped as `xae list_projects` / `xae select_project`, the per-call `tsProject`, and
+`TE1000_DEFAULT_TSPROJECT`; every response that reached a system manager now names its
+project, an unchosen pick among several is flagged `tsProjectAmbiguous`, and the verbs
+that change the target refuse it outright. See FORK-NOTES §8 for the design and why the
+refusal is limited to those verbs. The throwaway `.sln` with the test project first is no
+longer needed.
 
-Today the way around it is to generate a throwaway `.sln` that lists the test project
-first — which also has to keep the library project in it, because the suite resolves its
-own library through a bracketed project reference and a single-project solution fails
-with hundreds of `Unknown type`. That is a lot of scaffolding for "use the other
-project".
+### 2. ~~Set the active solution configuration / platform~~ — DONE
 
-Proposal: `xae list_projects` (name, path, `TargetNetId`, whether it holds a PLC project)
-plus either a session-level `select_project` mirroring `attach`, or a `tsProject`
-parameter on the tools that reach into a project. The `attach` design is the precedent —
-name the target explicitly, and fail with a list rather than fall back silently.
-
-### 2. Set the active solution configuration / platform
-
-`xae_build` builds whatever configuration happens to be active, and nothing can set it.
-A project whose active platform is `TwinCAT RT (x64)` builds for RT while CI builds
-`TwinCAT OS (x64)`, and the two verdicts can differ. `SolutionBuild.SolutionConfigurations`
-is plain EnvDTE, so this is small: list them, activate one by name, report the active one
-in `xae status`.
+Shipped as `xae list_configurations` / `xae set_configuration`; `xae_build` reports the
+configuration it built and takes a `project` to build one project of the solution. See
+FORK-NOTES §9. Reading `PlatformName` needed the typed cast, like the error list.
 
 ### 3. Read the Output window
 

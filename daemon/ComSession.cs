@@ -26,10 +26,64 @@ namespace Te1000Daemon
         private string _currentMoniker;
         private bool _ownedByUs;
 
+        // WHICH TwinCAT project (.tsproj) the cached sysmanager belongs to, and which one
+        // the caller asked this session to stay on. A solution holds one sysmanager PER
+        // .tsproj -- tree, target NetId, boot flags and activation all hang off it -- and
+        // the resolver used to take the first one that answered GetTargetNetId(). In every
+        // AU-tomation repo that first one is the library, so get_netid answered with the
+        // LOCAL NetId and activation targeted the project that has no task to run.
+        //
+        // _projectName/_projectPath: identity of the sysmanager currently cached.
+        // _selectedName/_selectedPath: the session-level choice made by select_project,
+        // re-applied on every later call (it survives a worker recycle, because it is
+        // held as name/path, not as a COM reference).
+        // _projectCandidates: how many .tsproj the last resolution had to choose from,
+        // so a caller can be told the pick was ambiguous instead of finding out by
+        // activating the wrong project.
+        private string _projectName;
+        private string _projectPath;
+        private string _selectedName;
+        private string _selectedPath;
+        private int _projectCandidates;
+        private bool _touchedProject;
+
         public int CurrentPid { get { return _currentPid; } }
         public bool OwnedByUs { get { return _ownedByUs; } }
+        public string CurrentProjectName { get { return _projectName; } }
+        public string CurrentProjectPath { get { return _projectPath; } }
+        public bool HasProjectSelection { get { return !string.IsNullOrWhiteSpace(_selectedName) || !string.IsNullOrWhiteSpace(_selectedPath); } }
 
-        public void MarkStale() { _stale = true; _dte = null; _sysManager = null; _currentPid = 0; _currentMoniker = null; _ownedByUs = false; }
+        // True when the last resolution picked among several .tsproj without being told
+        // which -- the case where the old behaviour silently landed on the wrong one.
+        public bool ProjectPickWasAmbiguous
+        {
+            get { return _projectCandidates > 1 && !HasProjectSelection; }
+        }
+
+        // Did THIS call reach a sysmanager? Lets the dispatcher annotate the response
+        // with the project that was actually worked on, and only then.
+        public bool TouchedProject { get { return _touchedProject; } }
+        public void BeginCall() { _touchedProject = false; }
+
+        public void MarkStale()
+        {
+            _stale = true; _dte = null; _sysManager = null; _currentPid = 0; _currentMoniker = null; _ownedByUs = false;
+            // The cached sysmanager is gone with the DTE, so its identity goes too -- but
+            // NOT the selection: it is a name, it outlives the RCW, and re-applying it is
+            // exactly what makes a worker recycle invisible to the caller.
+            _projectName = null; _projectPath = null; _projectCandidates = 0;
+        }
+
+        // Forget which project was chosen. Called when the ground the choice stood on
+        // moves: a different solution is opened, or the session attaches to another IDE.
+        // A selection kept across those would name a project that is no longer there and
+        // turn every later call into an error about a project the caller never mentioned.
+        public void ClearProjectSelection()
+        {
+            _selectedName = null; _selectedPath = null;
+            _projectName = null; _projectPath = null; _projectCandidates = 0;
+            _sysManager = null;
+        }
 
         // Best-effort release of a COM RCW. Guards against already-released RCWs
         // and non-COM objects (Marshal.ReleaseComObject throws ArgumentException
@@ -67,6 +121,8 @@ namespace Te1000Daemon
             if (string.IsNullOrWhiteSpace(progId)) progId = "TcXaeShell.DTE.17.0";
             if (string.IsNullOrWhiteSpace(mode)) mode = "active";
 
+            int previousPid = _currentPid;
+
             if (_dte != null && !_stale && _progId == progId)
             {
                 if (IsDteAlive(_dte) && SatisfiesRequest(mode, attach)) return _dte;
@@ -87,6 +143,12 @@ namespace Te1000Daemon
             _stale = false;
             _ownedByUs = created;
             ResolveCurrentIdentity(progId);
+            // A different IDE means a different solution, so a project chosen in the old
+            // one no longer names anything here. Dropped only on an actual change of
+            // instance: a reconnect to the SAME pid (worker recycle, dead RCW) keeps the
+            // choice, which is the whole point of holding it by name.
+            if (previousPid != 0 && _currentPid != previousPid) ClearProjectSelection();
+            else { _projectName = null; _projectPath = null; _projectCandidates = 0; }
             return _dte;
         }
 
@@ -427,9 +489,34 @@ namespace Te1000Daemon
         // Cached; retries transient RPC busy.
         public dynamic GetSysManager()
         {
-            if (_sysManager != null && !_stale)
+            return GetSysManager(null, false);
+        }
+
+        // Same, for ONE named project of the solution.
+        //
+        //   request           : the project named on this call, or null.
+        //   requireUnambiguous: for the verbs that act on the target (activate, restart,
+        //                       boot flags, boot generation). With several .tsproj in the
+        //                       solution and no choice on record, these refuse and list
+        //                       the projects rather than pick one -- picking is how the
+        //                       wrong runtime got activated. Reads keep working and are
+        //                       flagged ambiguous instead.
+        //
+        // Precedence: the per-call request, then the session selection (select_project),
+        // then the historical "first .tsproj that answers GetTargetNetId()".
+        public dynamic GetSysManager(ProjectRequest request, bool requireUnambiguous)
+        {
+            _touchedProject = true;
+
+            ProjectRequest target = (request != null && request.NamesTarget) ? request : SessionSelection();
+
+            if (_sysManager != null && !_stale && SatisfiesProject(target))
             {
-                if (IsSysManagerAlive(_sysManager)) return _sysManager;
+                if (IsSysManagerAlive(_sysManager))
+                {
+                    if (requireUnambiguous && target == null) AssertUnambiguous();
+                    return _sysManager;
+                }
                 _sysManager = null;
             }
             if (_dte == null) throw new BridgeException("DTE not acquired");
@@ -438,37 +525,48 @@ namespace Te1000Daemon
             {
                 try
                 {
-                    dynamic solution = _dte.Solution;
-                    if (solution != null && solution.Projects != null)
+                    List<ProjectInfo> projects = ListProjects(false);
+                    _projectCandidates = projects.Count;
+
+                    if (target != null)
                     {
-                        int count = (int)solution.Projects.Count;
-                        for (int i = 1; i <= count; i++)
-                        {
-                            dynamic project = solution.Projects.Item(i);
-                            if (project == null) continue;
-                            string fullName = null;
-                            try { fullName = (string)project.FullName; } catch { }
-                            if (string.IsNullOrWhiteSpace(fullName) ||
-                                !fullName.EndsWith(".tsproj", StringComparison.OrdinalIgnoreCase))
-                                continue;
-                            dynamic projectObject = null;
-                            try { projectObject = project.Object; } catch { }
-                            if (projectObject == null) continue;
-                            // Probe GetTargetNetId() — proves it's the live config surface.
-                            try
-                            {
-                                var probe = projectObject.GetTargetNetId();
-                                if (probe != null) { _sysManager = projectObject; return _sysManager; }
-                            }
-                            catch { }
-                        }
+                        ProjectInfo hit = MatchProject(projects, target);
+                        if (hit == null) throw new BridgeException(DescribeMissingProject(projects, target));
+                        BindProject(hit);
+                        return _sysManager;
                     }
+
+                    if (requireUnambiguous) AssertUnambiguous(projects);
+
+                    // No choice on record: the historical pick, the first .tsproj whose
+                    // Object answers GetTargetNetId() (that probe is what proves it is
+                    // the live config surface rather than a plain project node).
+                    foreach (ProjectInfo p in projects)
+                    {
+                        if (p.SysManager == null) continue;
+                        try
+                        {
+                            var probe = p.SysManager.GetTargetNetId();
+                            if (probe != null) { BindProject(p); return _sysManager; }
+                        }
+                        catch { }
+                    }
+
+                    // No TwinCAT project in the solution at all: the DTE-wide fallback.
+                    // Retried, because a solution still loading legitimately has neither
+                    // yet -- that retry is why the original loop caught its own throw.
                     dynamic sm = _dte.GetObject("TcSysManager");
-                    if (sm == null) throw new BridgeException("TcSysManager is null");
+                    if (sm == null)
+                    {
+                        if (attempt < 40) { System.Threading.Thread.Sleep(500); continue; }
+                        throw new BridgeException("TcSysManager is null");
+                    }
                     _sysManager = sm;
+                    _projectName = null;
+                    _projectPath = null;
                     return _sysManager;
                 }
-                catch (BridgeException) { if (attempt >= 40) throw; System.Threading.Thread.Sleep(500); }
+                catch (BridgeException) { throw; }
                 catch (Exception ex)
                 {
                     if (ComHelpers.IsRetryableComError(ex) && attempt < 40)
@@ -480,6 +578,242 @@ namespace Te1000Daemon
                 }
             }
             throw new BridgeException("TcSysManager not available");
+        }
+
+        // Bind the session to one project for good: select_project. Resolves it now, so a
+        // name that is not in the solution is an error HERE, at the call that named it,
+        // rather than at some later tool that never mentioned a project.
+        public ProjectInfo SelectProject(ProjectRequest request)
+        {
+            if (request == null || !request.NamesTarget)
+                throw new BridgeException("select_project requires name or path");
+            if (_dte == null) throw new BridgeException("DTE not acquired");
+
+            List<ProjectInfo> projects = ListProjects(true);
+            _projectCandidates = projects.Count;
+            ProjectInfo hit = MatchProject(projects, request);
+            if (hit == null) throw new BridgeException(DescribeMissingProject(projects, request));
+
+            BindProject(hit);
+            _selectedName = hit.Name;
+            _selectedPath = hit.FullName;
+            hit.IsCurrent = true;
+            return hit;
+        }
+
+        private ProjectRequest SessionSelection()
+        {
+            if (!HasProjectSelection) return null;
+            var r = new ProjectRequest();
+            r.Name = _selectedName;
+            r.Path = _selectedPath;
+            return r;
+        }
+
+        // Does the sysmanager we already hold answer this request? Mirrors
+        // SatisfiesRequest for instances: reuse the cached one only when it IS the one
+        // asked for, never merely because it is warm.
+        private bool SatisfiesProject(ProjectRequest target)
+        {
+            if (target == null) return true;
+            if (!string.IsNullOrWhiteSpace(target.Path) && PathUtil.SamePath(_projectPath, target.Path)) return true;
+            if (!string.IsNullOrWhiteSpace(target.Name) && NameMatches(_projectName, _projectPath, target.Name)) return true;
+            return false;
+        }
+
+        private void BindProject(ProjectInfo p)
+        {
+            _sysManager = p.SysManager;
+            _projectName = p.Name;
+            _projectPath = p.FullName;
+        }
+
+        private void AssertUnambiguous()
+        {
+            if (!ProjectPickWasAmbiguous) return;
+            AssertUnambiguous(ListProjects(false));
+        }
+
+        private void AssertUnambiguous(List<ProjectInfo> projects)
+        {
+            if (projects == null || projects.Count <= 1) return;
+            if (HasProjectSelection) return;
+            var names = new List<string>();
+            foreach (ProjectInfo p in projects)
+            {
+                names.Add(p.Name + (string.IsNullOrWhiteSpace(p.TargetNetId) ? "" : " (target " + p.TargetNetId + ")"));
+            }
+            throw new BridgeException(
+                "This solution has " + projects.Count.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+                " TwinCAT projects and none was chosen: " + string.Join("; ", names.ToArray()) +
+                ". This action changes the target, so it will not guess. Use xae list_projects, then xae select_project (or pass tsProject on this call).");
+        }
+
+        private static bool NameMatches(string projectName, string projectPath, string wanted)
+        {
+            if (string.IsNullOrWhiteSpace(wanted)) return false;
+            if (string.Equals(projectName, wanted, StringComparison.OrdinalIgnoreCase)) return true;
+            if (!string.IsNullOrWhiteSpace(projectPath))
+            {
+                string stem = null;
+                try { stem = System.IO.Path.GetFileNameWithoutExtension(projectPath); }
+                catch { }
+                if (string.Equals(stem, wanted, StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            return false;
+        }
+
+        private static ProjectInfo MatchProject(List<ProjectInfo> projects, ProjectRequest target)
+        {
+            if (!string.IsNullOrWhiteSpace(target.Path))
+            {
+                foreach (ProjectInfo p in projects)
+                    if (PathUtil.SamePath(p.FullName, target.Path)) return p;
+                // A relative or partial path is what a caller naturally types after
+                // reading list_projects; accept it when it identifies exactly one.
+                string tail = NormalizeTail(target.Path);
+                ProjectInfo only = null;
+                foreach (ProjectInfo p in projects)
+                {
+                    string full = NormalizeTail(p.FullName);
+                    if (full != null && tail != null && full.EndsWith(tail, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (only != null) return null;   // ambiguous suffix: not a match
+                        only = p;
+                    }
+                }
+                if (only != null) return only;
+            }
+            if (!string.IsNullOrWhiteSpace(target.Name))
+            {
+                foreach (ProjectInfo p in projects)
+                    if (NameMatches(p.Name, p.FullName, target.Name)) return p;
+            }
+            return null;
+        }
+
+        private static string NormalizeTail(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return null;
+            return path.Trim().Replace('/', '\\').TrimEnd('\\');
+        }
+
+        private static string DescribeMissingProject(List<ProjectInfo> projects, ProjectRequest target)
+        {
+            var have = new List<string>();
+            foreach (ProjectInfo p in projects) have.Add(p.Name + " -> " + p.FullName);
+            string list = have.Count == 0 ? "none (no .tsproj in this solution)" : string.Join("; ", have.ToArray());
+            return "No TwinCAT project in this solution matches " + target.Describe() +
+                   ". Projects: " + list + ". Use xae list_projects to see them.";
+        }
+
+        // Every TwinCAT project of the open solution, in solution order.
+        //
+        // `detailed` adds the reads that cost a COM round trip each (target NetId, PLC
+        // project count), so the resolver -- which runs on every sysmanager call -- does
+        // not pay for what only list_projects displays.
+        public List<ProjectInfo> ListProjects(bool detailed)
+        {
+            if (_dte == null) throw new BridgeException("DTE not acquired");
+            var result = new List<ProjectInfo>();
+            dynamic solution = _dte.Solution;
+            if (solution == null || solution.Projects == null) return result;
+
+            int count = 0;
+            try { count = (int)solution.Projects.Count; }
+            catch { count = 0; }
+            for (int i = 1; i <= count; i++)
+            {
+                dynamic project = null;
+                try { project = solution.Projects.Item(i); }
+                catch { }
+                CollectProject(project, result, detailed);
+            }
+            return result;
+        }
+
+        // One solution entry. Solution FOLDERS are projects too, and the real projects
+        // then hang off their ProjectItems as SubProject -- a solution that groups the
+        // library and its test suite in a folder would otherwise look empty.
+        private void CollectProject(dynamic project, List<ProjectInfo> result, bool detailed)
+        {
+            if (project == null) return;
+
+            string fullName = null;
+            try { fullName = (string)project.FullName; }
+            catch { }
+
+            if (!string.IsNullOrWhiteSpace(fullName) &&
+                fullName.EndsWith(".tsproj", StringComparison.OrdinalIgnoreCase))
+            {
+                var info = new ProjectInfo();
+                info.FullName = fullName;
+                info.Name = ComHelpers.SafeStr(delegate { return project.Name; });
+                info.UniqueName = ComHelpers.SafeStr(delegate { return project.UniqueName; });
+                try { info.SysManager = project.Object; }
+                catch { info.SysManager = null; }
+                info.IsCurrent = PathUtil.SamePath(_projectPath, fullName);
+
+                if (detailed && info.SysManager != null)
+                {
+                    info.TargetNetId = ComHelpers.SafeStr(delegate { return info.SysManager.GetTargetNetId(); });
+                    try
+                    {
+                        dynamic tipc = info.SysManager.LookupTreeItem("TIPC");
+                        info.PlcProjectCount = ComHelpers.ChildCount(tipc);
+                    }
+                    catch { info.PlcProjectCount = 0; }
+                }
+                result.Add(info);
+                return;
+            }
+
+            // Not a .tsproj: it may still be a solution folder holding some.
+            dynamic items = null;
+            try { items = project.ProjectItems; }
+            catch { }
+            if (items == null) return;
+            int n = 0;
+            try { n = (int)items.Count; }
+            catch { n = 0; }
+            for (int i = 1; i <= n; i++)
+            {
+                dynamic sub = null;
+                try { sub = items.Item(i).SubProject; }
+                catch { }
+                if (sub != null) CollectProject(sub, result, detailed);
+            }
+        }
+
+        // Which project of the solution to work on: by Name (the solution-explorer name,
+        // or the .tsproj filename without extension) or by Path.
+        public sealed class ProjectRequest
+        {
+            public string Name;
+            public string Path;
+
+            public bool NamesTarget
+            {
+                get { return !string.IsNullOrWhiteSpace(Name) || !string.IsNullOrWhiteSpace(Path); }
+            }
+
+            public string Describe()
+            {
+                if (!string.IsNullOrWhiteSpace(Path)) return "path '" + Path + "'";
+                return "name '" + Name + "'";
+            }
+        }
+
+        // One TwinCAT project of the solution, as reported to the caller.
+        public sealed class ProjectInfo
+        {
+            public string Name;
+            public string FullName;
+            public string UniqueName;
+            public string TargetNetId;
+            public int PlcProjectCount;
+            public bool IsCurrent;
+            public dynamic SysManager;
         }
 
         private static bool IsSysManagerAlive(dynamic sm)

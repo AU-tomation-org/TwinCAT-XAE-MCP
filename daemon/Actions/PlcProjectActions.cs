@@ -114,7 +114,7 @@ namespace Te1000Daemon
         // Maps to SetBootFlags (config-only). ITcPlcProject lives on the PLC ROOT.
         private static Json.JObj BootFlags(ActionContext ctx)
         {
-            dynamic sm = ctx.SysManager();
+            dynamic sm = ctx.SysManagerForTargetAction();
             string treePath = ResolvePlcRootPath(ctx, sm, ctx.Payload.Str("treePath"));
             dynamic item = ComHelpers.GetTreeItem(sm, treePath);
 
@@ -147,7 +147,7 @@ namespace Te1000Daemon
         // verb in this tool that writes toward the live target.
         private static Json.JObj GenerateBoot(ActionContext ctx)
         {
-            dynamic sm = ctx.SysManager();
+            dynamic sm = ctx.SysManagerForTargetAction();
             string treePath = ResolvePlcRootPath(ctx, sm, ctx.Payload.Str("treePath"));
             dynamic plcProject = ComHelpers.GetTreeItem(sm, treePath);
 

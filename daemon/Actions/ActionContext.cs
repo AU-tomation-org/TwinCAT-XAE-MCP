@@ -67,10 +67,43 @@ namespace Te1000Daemon
             if (Cache != null) Cache.Clear();
         }
 
+        // Which TwinCAT project of the solution this call names, or null when it names
+        // none (then the session selection applies, and failing that the first .tsproj).
+        // `tsProject` takes either the project name or its .tsproj path -- one parameter,
+        // because a caller reading list_projects has both in front of it and should not
+        // have to know which one this tool wants.
+        public ComSession.ProjectRequest ProjectTarget
+        {
+            get
+            {
+                string v = Payload.Truthy("tsProject") ? Payload.Str("tsProject") : null;
+                if (string.IsNullOrWhiteSpace(v)) return null;
+                var r = new ComSession.ProjectRequest();
+                if (v.IndexOf('\\') >= 0 || v.IndexOf('/') >= 0 ||
+                    v.EndsWith(".tsproj", StringComparison.OrdinalIgnoreCase))
+                    r.Path = v;
+                else
+                    r.Name = v;
+                return r;
+            }
+        }
+
         public dynamic SysManager()
         {
             Session.GetDte(ProgId, Mode, true, Attach);
-            return Session.GetSysManager();
+            return Session.GetSysManager(ProjectTarget, false);
+        }
+
+        // For the verbs that act ON the target rather than read the tree -- activate,
+        // restart, boot flags, boot generation, download. With more than one .tsproj in
+        // the solution and no project named (per call or per session), these refuse and
+        // list the projects instead of falling back to the first one: getting this wrong
+        // activates a configuration on a machine nobody meant to touch, and the old
+        // behaviour gave no sign it had chosen.
+        public dynamic SysManagerForTargetAction()
+        {
+            Session.GetDte(ProgId, Mode, true, Attach);
+            return Session.GetSysManager(ProjectTarget, true);
         }
 
         // Standard success payload {ok:true, data:...} is assembled by the

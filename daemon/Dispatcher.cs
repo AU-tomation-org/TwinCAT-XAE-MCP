@@ -138,9 +138,13 @@ namespace Te1000Daemon
 
             var result = _worker.Run(() =>
             {
-                var ctx = new ActionContext(action, payload, _worker.Session, _cache, _edits);
+                ComSession session = _worker.Session;
+                var ctx = new ActionContext(action, payload, session, _cache, _edits);
+                session.BeginCall();
                 Json.JObj data = handler(ctx);
-                return data ?? new Json.JObj();
+                if (data == null) data = new Json.JObj();
+                AnnotateProject(session, data);
+                return data;
             }, timeout);
 
             if (result.Ok)
@@ -164,6 +168,28 @@ namespace Te1000Daemon
                 if (result.Dialog != null) resp["dialog"] = result.Dialog.ToJson();
             }
             return resp;
+        }
+
+        // Say WHICH TwinCAT project the call worked on, on every response that reached a
+        // sysmanager. A solution holds one per .tsproj and they differ in the thing that
+        // matters most -- the target NetId -- so a result that does not name its project
+        // cannot be read: "the runtime restarted" is a different fact depending on which
+        // one it was. When the pick was made among several with nothing to go on, say so
+        // too; the read still returns, but the caller can see it was a guess.
+        private static void AnnotateProject(ComSession session, Json.JObj data)
+        {
+            if (session == null || data == null) return;
+            if (!session.TouchedProject) return;
+            if (data.Has("tsProject")) return;
+
+            string name = session.CurrentProjectName;
+            if (!string.IsNullOrWhiteSpace(name)) data["tsProject"] = name;
+            if (!string.IsNullOrWhiteSpace(session.CurrentProjectPath)) data["tsProjectPath"] = session.CurrentProjectPath;
+            if (session.ProjectPickWasAmbiguous)
+            {
+                data["tsProjectAmbiguous"] = true;
+                data["tsProjectNote"] = "Several TwinCAT projects are open and none was chosen; this is the first one in solution order. Use xae list_projects / select_project, or pass tsProject, to work on another.";
+            }
         }
 
         // dialog_resolve handler. COM-free; runs on the pipe thread (no STA hop),

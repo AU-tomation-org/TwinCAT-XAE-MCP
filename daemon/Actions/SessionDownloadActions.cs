@@ -34,7 +34,7 @@ namespace Te1000Daemon
         // LIVE-cell action. index.js guards with ALLOW_TWINCAT_ACTIVATE.
         private static Json.JObj ActivateConfiguration(ActionContext ctx)
         {
-            dynamic sm = ctx.SysManager();
+            dynamic sm = ctx.SysManagerForTargetAction();
             sm.ActivateConfiguration();
             ctx.Cache.Invalidate(null);
 
@@ -81,7 +81,7 @@ namespace Te1000Daemon
             // Default: headless deployment via ITcPlcProject (Beckhoff CI path).
             // GenerateBootProject($true) writes the boot project to the target's
             // boot directory; the runtime loads it on the next TwinCAT restart.
-            dynamic sm = ctx.SysManager();
+            dynamic sm = ctx.SysManagerForTargetAction();
 
             // ITcPlcProject is implemented by the PLC root node (TIPC^<name>), NOT the
             // nested "<name> Project" node (that one only carries ITcPlcIECProject*).
@@ -130,7 +130,7 @@ namespace Te1000Daemon
         // LIVE-cell action. index.js guards with ALLOW_TWINCAT_RESTART.
         private static Json.JObj RestartRuntime(ActionContext ctx)
         {
-            dynamic sm = ctx.SysManager();
+            dynamic sm = ctx.SysManagerForTargetAction();
             object wasStarted = null;
             try { wasStarted = (bool)sm.IsTwinCATStarted(); }
             catch { }

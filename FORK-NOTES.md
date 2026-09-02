@@ -149,6 +149,70 @@ Three changes, which together make the choice explicit:
   `create` alone deliberately reuses ours, so that passing it on every call does not spawn
   one IDE per call.
 
+### 8. Choosing which TwinCAT project of the solution to work on
+
+The same hole as §7, one level down. `ComSession.GetSysManager` took **the first
+`.tsproj` of the solution** whose project object answered `GetTargetNetId()`, and cached
+it. But a solution holds one system manager *per* TwinCAT project, and everything that
+matters hangs off it: the `TIID`/`TIPC` tree, the target NetId, the boot flags, the
+activation.
+
+Every AU-tomation repo has two projects — the library and its TcUnit suite — and the
+library comes first. So `tc_system get_netid` answered with the **local** NetId (only the
+test project carries a `TargetNetId`), and `set_boot_flags` / `plc_download` /
+`twincat_activate_configuration` all targeted the project with no task to run, reporting
+success either way. The way around it was to generate a throwaway `.sln` listing the test
+project first — which still had to include the library, because the suite resolves it
+through a bracketed project reference and a single-project solution fails with hundreds
+of `Unknown type`.
+
+The design follows §7 deliberately, because the problem is the same shape:
+
+- **`xae list_projects`** — every `.tsproj` of the open solution: `name`, `path`,
+  `uniqueName`, `targetNetId`, how many PLC projects it holds, and which one the session
+  is on. Read-only, and it changes no selection. Solution folders are walked, so grouped
+  projects are listed too.
+- **`xae select_project` (`name` | `path`)** — bind the session to one. A miss is an
+  **error listing the projects that are there**. The binding sticks for later calls,
+  including the tools that take no project parameter, and is held by name — so it
+  survives a worker recycle. It is dropped when the ground moves: opening another
+  solution, or attaching to another IDE.
+- **`tsProject` on any project-scoped tool** — the per-call form, name or path. Declared
+  once for every such tool and carried from the handler to the daemon through an
+  `AsyncLocalStorage` scope, so it works everywhere without ~200 call sites forwarding
+  it. `TE1000_DEFAULT_TSPROJECT` is the environment default, the sibling of
+  `TE1000_PROGID` and `TE1000_DEFAULT_MODE`.
+- **Every response that reached a system manager says which project it was**
+  (`tsProject`, `tsProjectPath`). "The runtime restarted" is a different fact depending
+  on the project, and the response never said which.
+- **An ambiguous pick is declared, and the verbs that change the target refuse it.**
+  With more than one `.tsproj` and no choice on record, reads still answer from the first
+  in solution order and carry `tsProjectAmbiguous: true`. But `twincat_activate_configuration`,
+  `twincat_restart_runtime`, `plc_download`, `plc_project boot_flags` / `generate_boot`,
+  `tc_system set_netid` and `set_target_platform` fail with the list instead: guessing
+  there activates a configuration on a machine nobody meant to touch, and the old
+  behaviour gave no sign it had chosen at all. A single-project solution is unaffected —
+  nothing to choose, nothing refused.
+
+### 9. The solution configuration is readable, settable, and reported
+
+`xae_build` built whatever configuration happened to be active, and nothing could read or
+set it. A solution left on `TwinCAT RT (x64)` builds RT while CI builds
+`TwinCAT OS (x64)`, and the two verdicts differ with nothing on the response to say why.
+
+- **`xae list_configurations`** — the solution configurations and which is active;
+  **`xae set_configuration` (`name`, `platform?`)** activates one, `name` accepting
+  either `Release` or the full `Release|TwinCAT OS (x64)`.
+- **`xae_build` reports the configuration it built.**
+- **`xae_build` takes `project`** — build ONE project of the solution
+  (`SolutionBuild.BuildProject`) instead of all of it, with an optional `configuration`.
+  `build` only: EnvDTE has no per-project clean or rebuild, and saying so is better than
+  quietly cleaning the whole solution.
+
+`SolutionConfiguration2.PlatformName` needed the same typed cast as the error list (§2):
+through raw IDispatch every configuration came back platform-less, which on a real
+solution printed seven identical `Debug` rows.
+
 ---
 
 ## Things to know before using this (not bugs)

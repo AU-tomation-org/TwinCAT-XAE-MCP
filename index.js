@@ -20,6 +20,7 @@
 
 const { spawn } = require("child_process");
 const path = require("path");
+const { AsyncLocalStorage } = require("async_hooks");
 const { McpServer } = require("@modelcontextprotocol/server");
 const { serveStdio } = require("@modelcontextprotocol/server/stdio");
 const daemonClient = require("./daemonClient.js");
@@ -98,9 +99,30 @@ if (process.env.TE1000_DEFAULT_MODE && !ENV_MODE) {
   console.error(`te1000-mcp: ignoring TE1000_DEFAULT_MODE="${process.env.TE1000_DEFAULT_MODE}" (expected one of ${VALID_MODES.join(", ")})`);
 }
 
+// TE1000_DEFAULT_TSPROJECT — the sibling of TE1000_PROGID / TE1000_DEFAULT_MODE one
+// level down: which TwinCAT project of the solution to work on when a call names
+// none. A solution holds one system manager per .tsproj, and every AU-tomation repo
+// keeps the library and its TcUnit suite in the same one, so a session that always
+// means the test project can say so once here instead of on every call.
+//
+// Precedence, weakest last: the per-call tsProject, the session's select_project
+// (held in the daemon), then this default.
+const ENV_TSPROJECT = process.env.TE1000_DEFAULT_TSPROJECT || null;
+
+// Carries the per-call tsProject from the tool handler down to bridgeCall without
+// threading it through ~200 call sites. AsyncLocalStorage rather than a module
+// variable because tool calls can overlap in flight, and a shared variable would
+// hand one call's project to another.
+const callScope = new AsyncLocalStorage();
+
 async function bridgeCall(action, payload = {}) {
   if (process.env.TE1000_PROGID && !payload.progId) payload.progId = process.env.TE1000_PROGID;
   if (ENV_MODE && !payload.mode) payload.mode = ENV_MODE;
+  if (!payload.tsProject) {
+    const scope = callScope.getStore();
+    if (scope && scope.tsProject) payload.tsProject = scope.tsProject;
+    else if (ENV_TSPROJECT) payload.tsProject = ENV_TSPROJECT;
+  }
   return runBridge(action, payload);
 }
 
@@ -193,7 +215,14 @@ function need(params, keys, action) {
 // buildServer() replays them onto a new McpServer per factory call.
 const registrations = [];
 const server = {
-  registerTool: (name, config, handler) => registrations.push([name, config, handler]),
+  // Every handler runs inside a scope carrying this call's tsProject, so the
+  // parameter works on any project-scoped tool without each handler forwarding it.
+  registerTool: (name, config, handler) =>
+    registrations.push([
+      name,
+      config,
+      (params, extra) => callScope.run({ tsProject: params && params.tsProject }, () => handler(params, extra)),
+    ]),
 };
 
 function buildServer() {
@@ -218,11 +247,19 @@ function buildServer() {
 server.registerTool(
   "xae",
   toolSchemas.xae,
-  async ({ action, solutionPath, closeExisting, discardChanges, filter, limit, severityFilter, button, remember, save, confirm, pid, attachPid, attachSolution, forceNew, mode }) => {
+  async ({ action, solutionPath, closeExisting, discardChanges, filter, limit, severityFilter, button, remember, save, confirm, pid, attachPid, attachSolution, forceNew, mode, name, path: projectPath, platform }) => {
     const payload = { mode, attachPid, attachSolution, forceNew };
     if (action === "attach") {
       if (!pid && !solutionPath) throw new Error("attach requires pid or solutionPath (use list_instances to see what is running).");
       Object.assign(payload, { pid, solutionPath });
+    }
+    if (action === "select_project") {
+      if (!name && !projectPath) throw new Error("select_project requires name or path (use list_projects to see the projects of this solution).");
+      Object.assign(payload, { name, path: projectPath });
+    }
+    if (action === "set_configuration") {
+      if (!name) throw new Error("set_configuration requires name (use list_configurations to see them).");
+      Object.assign(payload, { name, platform });
     }
     if (action === "shutdown_ide") {
       if (confirm !== IDE_SHUTDOWN_CONFIRMATION) {

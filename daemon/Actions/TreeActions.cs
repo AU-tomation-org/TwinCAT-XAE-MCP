@@ -958,7 +958,7 @@ namespace Te1000Daemon
             string targetNetId = ctx.Payload.Str("targetNetId");
             if (string.IsNullOrWhiteSpace(targetNetId)) throw new BridgeException("targetNetId is required");
 
-            dynamic sm = ctx.SysManager();
+            dynamic sm = ctx.SysManagerForTargetAction();
             sm.SetTargetNetId(targetNetId);
 
             var data = new Json.JObj();

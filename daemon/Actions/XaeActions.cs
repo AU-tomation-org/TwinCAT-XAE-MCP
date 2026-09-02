@@ -28,6 +28,10 @@ namespace Te1000Daemon
             h["xae_shutdown_ide"] = XaeShutdownIde;
             h["xae_list_instances"] = XaeListInstances;
             h["xae_attach"] = XaeAttach;
+            h["xae_list_projects"] = XaeListProjects;
+            h["xae_select_project"] = XaeSelectProject;
+            h["xae_list_configurations"] = XaeListConfigurations;
+            h["xae_set_configuration"] = XaeSetConfiguration;
         }
 
         // ---- shared helpers (port of bridge helper functions) ----------------
@@ -175,9 +179,14 @@ namespace Te1000Daemon
             var data = new Json.JObj();
             data["progId"] = ctx.ProgId;
             data["mode"] = ctx.Mode;
+            data["pid"] = ctx.Session.CurrentPid;
             data["solution"] = solution;
             data["automationSettingsAvailable"] = automationAvailable;
             data["sysManagerAvailable"] = sysManagerAvailable;
+            // Which project and which configuration the next call would work on. Both
+            // decide the outcome of a build or an activation and neither was visible.
+            data["activeConfiguration"] = ComHelpers.SafeStr(delegate { return ActiveConfigurationName(dte.Solution.SolutionBuild); });
+            data["tsProjectSelected"] = ctx.Session.HasProjectSelection;
             return data;
         }
 
@@ -211,6 +220,10 @@ namespace Te1000Daemon
             dte.Solution.Open(solutionPath);
             Json.JObj solution = WaitForSolutionOpen(dte, solutionPath);
             GetAutomationSettings(dte);
+            // A project chosen in the previous solution names nothing in this one, and a
+            // stale selection would turn every later call into an error about a project
+            // the caller never mentioned.
+            ctx.Session.ClearProjectSelection();
 
             var data = new Json.JObj();
             data["progId"] = ctx.ProgId;
@@ -458,6 +471,241 @@ namespace Te1000Daemon
             return data;
         }
 
+        // xae_list_projects -- the TwinCAT projects of the open solution.
+        //
+        // The counterpart of list_instances one level down: attach chooses WHICH IDE,
+        // this chooses WHICH .tsproj inside its solution. Every AU-tomation repo holds
+        // two (the library and its TcUnit suite) and only one of them carries a
+        // TargetNetId, so "the first project" is a coin toss that decides which runtime
+        // gets activated. Read-only: it resolves nothing and changes no selection.
+        private static Json.JObj XaeListProjects(ActionContext ctx)
+        {
+            dynamic dte = ctx.Dte(true);
+            Json.JObj solution = GetSolutionInfo(dte);
+            if (!solution.Bool("isOpen")) throw new BridgeException("No solution is open in XAE");
+
+            var projects = ctx.Session.ListProjects(true);
+
+            var arr = new Json.JArr();
+            foreach (var p in projects)
+            {
+                var o = new Json.JObj();
+                o["name"] = p.Name;
+                o["path"] = p.FullName;
+                o["uniqueName"] = p.UniqueName;
+                o["targetNetId"] = p.TargetNetId;
+                o["plcProjectCount"] = p.PlcProjectCount;
+                o["hasPlcProject"] = p.PlcProjectCount > 0;
+                o["isCurrent"] = p.IsCurrent;
+                arr.Add(o);
+            }
+
+            var data = new Json.JObj();
+            data["solution"] = solution;
+            data["count"] = arr.Count;
+            data["projects"] = arr;
+            data["selected"] = ctx.Session.HasProjectSelection ? ctx.Session.CurrentProjectName : null;
+            if (arr.Count > 1 && !ctx.Session.HasProjectSelection)
+            {
+                data["note"] = "No project chosen: reads fall back to the first one, and the actions that change the target (activate, restart, boot flags, download) refuse until one is named. Use select_project, or pass tsProject per call.";
+            }
+            return data;
+        }
+
+        // xae_select_project -- bind this session to ONE TwinCAT project of the solution.
+        //
+        // Same contract as attach: a miss is an error that lists what IS there, never a
+        // silent fallback, and the binding sticks for later calls -- including the tools
+        // that take no project parameter of their own. Dropped when the ground moves:
+        // opening another solution, or attaching to another IDE.
+        private static Json.JObj XaeSelectProject(ActionContext ctx)
+        {
+            string name = ctx.Payload.Truthy("name") ? ctx.Payload.Str("name") : null;
+            string path = ctx.Payload.Truthy("path") ? ctx.Payload.Str("path") : null;
+            if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(path))
+                throw new BridgeException("select_project requires name or path (use list_projects to see them)");
+
+            dynamic dte = ctx.Dte(true);
+            Json.JObj solution = GetSolutionInfo(dte);
+            if (!solution.Bool("isOpen")) throw new BridgeException("No solution is open in XAE");
+
+            var req = new ComSession.ProjectRequest();
+            req.Name = name;
+            req.Path = path;
+            var chosen = ctx.Session.SelectProject(req);
+
+            // The tree cache is keyed by path, and the same path names a different item
+            // in another project -- keeping it would answer from the previous project.
+            if (ctx.Cache != null) ctx.Cache.Clear();
+
+            var data = new Json.JObj();
+            data["selected"] = true;
+            data["solution"] = solution;
+            data["tsProject"] = chosen.Name;
+            data["tsProjectPath"] = chosen.FullName;
+            data["uniqueName"] = chosen.UniqueName;
+            data["targetNetId"] = chosen.TargetNetId;
+            data["plcProjectCount"] = chosen.PlcProjectCount;
+            return data;
+        }
+
+        // xae_list_configurations -- the solution configurations, and which is active.
+        //
+        // xae_build builds whatever configuration happens to be active and nothing could
+        // read or set it: a solution left on TwinCAT RT (x64) builds RT while CI builds
+        // TwinCAT OS (x64), and the two verdicts differ with nothing on the response to
+        // say why.
+        private static Json.JObj XaeListConfigurations(ActionContext ctx)
+        {
+            dynamic dte = ctx.Dte(true);
+            Json.JObj solution = GetSolutionInfo(dte);
+            if (!solution.Bool("isOpen")) throw new BridgeException("No solution is open in XAE");
+
+            dynamic solutionBuild = dte.Solution.SolutionBuild;
+            var arr = new Json.JArr();
+            string activeName = ActiveConfigurationName(solutionBuild);
+
+            dynamic configurations = null;
+            try { configurations = solutionBuild.SolutionConfigurations; }
+            catch { }
+            if (configurations != null)
+            {
+                int count = ComHelpers.SafeInt(delegate { return configurations.Count; }, 0);
+                for (int i = 1; i <= count; i++)
+                {
+                    dynamic cfg = null;
+                    try { cfg = configurations.Item(i); }
+                    catch { }
+                    if (cfg == null) continue;
+                    string full = ConfigurationFullName(cfg);
+                    var o = new Json.JObj();
+                    o["name"] = ComHelpers.SafeStr(delegate { return cfg.Name; });
+                    o["platform"] = PlatformName(cfg);
+                    o["fullName"] = full;
+                    o["isActive"] = !string.IsNullOrWhiteSpace(full) &&
+                                    string.Equals(full, activeName, StringComparison.OrdinalIgnoreCase);
+                    arr.Add(o);
+                }
+            }
+
+            var data = new Json.JObj();
+            data["solution"] = solution;
+            data["active"] = activeName;
+            data["count"] = arr.Count;
+            data["configurations"] = arr;
+            return data;
+        }
+
+        // xae_set_configuration -- activate one solution configuration by name.
+        //
+        // `name` may be the bare configuration ("Release") or the full form
+        // ("Release|TwinCAT OS (x64)"); `platform` names the platform separately. A miss
+        // lists what exists, like every other choice in this server.
+        private static Json.JObj XaeSetConfiguration(ActionContext ctx)
+        {
+            string wanted = ctx.Require("name");
+            string platform = ctx.Payload.Truthy("platform") ? ctx.Payload.Str("platform") : null;
+
+            dynamic dte = ctx.Dte(true);
+            Json.JObj solution = GetSolutionInfo(dte);
+            if (!solution.Bool("isOpen")) throw new BridgeException("No solution is open in XAE");
+
+            dynamic solutionBuild = dte.Solution.SolutionBuild;
+            dynamic configurations = null;
+            try { configurations = solutionBuild.SolutionConfigurations; }
+            catch { }
+            if (configurations == null) throw new BridgeException("SolutionConfigurations is not available on this solution");
+
+            // Split a full "Config|Platform" so both spellings reach the same match.
+            if (string.IsNullOrWhiteSpace(platform))
+            {
+                int bar = wanted.IndexOf('|');
+                if (bar > 0)
+                {
+                    platform = wanted.Substring(bar + 1).Trim();
+                    wanted = wanted.Substring(0, bar).Trim();
+                }
+            }
+
+            int count = ComHelpers.SafeInt(delegate { return configurations.Count; }, 0);
+            dynamic match = null;
+            var have = new List<string>();
+            for (int i = 1; i <= count; i++)
+            {
+                dynamic cfg = null;
+                try { cfg = configurations.Item(i); }
+                catch { }
+                if (cfg == null) continue;
+                string cfgName = ComHelpers.SafeStr(delegate { return cfg.Name; });
+                string cfgPlatform = PlatformName(cfg);
+                have.Add(ConfigurationFullName(cfg));
+                if (!string.Equals(cfgName, wanted, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!string.IsNullOrWhiteSpace(platform) &&
+                    !string.Equals(cfgPlatform, platform, StringComparison.OrdinalIgnoreCase)) continue;
+                match = cfg;
+                break;
+            }
+
+            if (match == null)
+            {
+                string want = wanted + (string.IsNullOrWhiteSpace(platform) ? "" : "|" + platform);
+                throw new BridgeException("No solution configuration matches '" + want + "'. Configurations: " +
+                    (have.Count == 0 ? "none" : string.Join("; ", have.ToArray())) + ".");
+            }
+
+            match.Activate();
+
+            var data = new Json.JObj();
+            data["solution"] = solution;
+            data["activated"] = ConfigurationFullName(match);
+            data["active"] = ActiveConfigurationName(solutionBuild);
+            return data;
+        }
+
+        // "Config|Platform" for one SolutionConfiguration, or just the name when the
+        // platform is unreadable (SolutionConfiguration2.PlatformName is EnvDTE80; a
+        // plain SolutionConfiguration has no platform at all).
+        private static string ConfigurationFullName(dynamic cfg)
+        {
+            string name = ComHelpers.SafeStr(delegate { return cfg.Name; });
+            string platform = PlatformName(cfg);
+            if (string.IsNullOrWhiteSpace(name)) return null;
+            return string.IsNullOrWhiteSpace(platform) ? name : name + "|" + platform;
+        }
+
+        // EnvDTE80.SolutionConfiguration2.PlatformName is NOT reachable through raw
+        // IDispatch -- the same blind spot as ToolWindows.ErrorList below. Measured on
+        // an AUT_Core solution: late binding returned nothing for every entry, so the
+        // list came back as seven identical "Debug" rows and the platform, the whole
+        // reason to read configurations at all, was invisible. The typed cast reads it.
+        private static string PlatformName(dynamic cfg)
+        {
+            string viaDispatch = ComHelpers.SafeStr(delegate { return cfg.PlatformName; });
+            if (!string.IsNullOrWhiteSpace(viaDispatch)) return viaDispatch;
+
+            IntPtr pUnk = IntPtr.Zero;
+            try
+            {
+                VsInterop.EnsureResolver();
+                pUnk = Marshal.GetIUnknownForObject((object)cfg);
+                var typed = (EnvDTE80.SolutionConfiguration2)Marshal.GetTypedObjectForIUnknown(pUnk, typeof(EnvDTE80.SolutionConfiguration2));
+                return typed == null ? null : typed.PlatformName;
+            }
+            catch { return null; }
+            finally { if (pUnk != IntPtr.Zero) Marshal.Release(pUnk); }
+        }
+
+        private static string ActiveConfigurationName(dynamic solutionBuild)
+        {
+            try
+            {
+                dynamic active = solutionBuild.ActiveConfiguration;
+                if (active == null) return null;
+                return ConfigurationFullName(active);
+            }
+            catch { return null; }
+        }
+
         // xae_shutdown_ide -- close the IDE this session is driving.
         //
         // Without this the daemon had no way to end an IDE it had started: killing the
@@ -573,11 +821,50 @@ namespace Te1000Daemon
             int timeoutMs = 1800000;
             if (ctx.Payload.Has("timeoutMs")) timeoutMs = ctx.Payload.Int("timeoutMs", 1800000);
 
+            string project = ctx.Payload.Truthy("project") ? ctx.Payload.Str("project") : null;
+            string configuration = ctx.Payload.Truthy("configuration") ? ctx.Payload.Str("configuration") : null;
+
             dynamic dte = ctx.Dte(true);
             Json.JObj solution = GetSolutionInfo(dte);
             if (!solution.Bool("isOpen")) throw new BridgeException("No solution is open in XAE");
 
             dynamic solutionBuild = dte.Solution.SolutionBuild;
+
+            // ONE project of the solution instead of all of it. A repo whose library and
+            // TcUnit suite sit in the same solution rebuilds both on every edit, and a
+            // failure in the one you are not working on stops the build you asked for.
+            if (!string.IsNullOrWhiteSpace(project))
+            {
+                if (actionName != "build")
+                    throw new BridgeException("Only action 'build' takes a project: EnvDTE has no per-project clean or rebuild (SolutionBuild.Clean is solution-wide). Run clean/rebuild without 'project', or build the project after a solution clean.");
+
+                string uniqueName = ResolveProjectUniqueName(dte, project);
+                string configName = string.IsNullOrWhiteSpace(configuration)
+                    ? ActiveConfigurationName(solutionBuild)
+                    : configuration;
+                if (string.IsNullOrWhiteSpace(configName))
+                    throw new BridgeException("No active solution configuration to build with; pass configuration (see xae list_configurations)");
+
+                solutionBuild.BuildProject(configName, uniqueName, waitForFinish);
+
+                Json.JObj projectBuild = new Json.JObj();
+                projectBuild["buildState"] = ComHelpers.SafeInt(delegate { return solutionBuild.BuildState; }, 0);
+                projectBuild["lastBuildInfo"] = null;
+                if (waitForFinish) projectBuild = WaitForBuildFinish(solutionBuild, timeoutMs);
+                else { try { projectBuild["lastBuildInfo"] = (int)solutionBuild.LastBuildInfo; } catch { } }
+
+                var projectData = new Json.JObj();
+                projectData["action"] = actionName;
+                projectData["waited"] = waitForFinish;
+                projectData["solution"] = solution;
+                projectData["project"] = uniqueName;
+                projectData["configuration"] = configName;
+                projectData["build"] = projectBuild;
+                return projectData;
+            }
+
+            if (!string.IsNullOrWhiteSpace(configuration))
+                throw new BridgeException("configuration only applies with 'project'; to build the whole solution in another configuration activate it first with xae set_configuration");
 
             switch (actionName)
             {
@@ -617,8 +904,79 @@ namespace Te1000Daemon
             data["action"] = actionName;
             data["waited"] = waitForFinish;
             data["solution"] = solution;
+            data["configuration"] = ActiveConfigurationName(solutionBuild);
             data["build"] = buildResult;
             return data;
+        }
+
+        // The UniqueName EnvDTE wants for SolutionBuild.BuildProject, from whatever the
+        // caller had at hand: the project name, its UniqueName, or its file path. Walks
+        // solution folders too, and covers every project kind (a solution can hold C++
+        // and HMI projects next to the .tsproj), which is why it does not reuse
+        // ComSession.ListProjects -- that one is deliberately .tsproj only.
+        private static string ResolveProjectUniqueName(dynamic dte, string wanted)
+        {
+            var candidates = new List<Json.JObj>();
+            CollectSolutionProjects(dte.Solution.Projects, candidates);
+
+            foreach (var p in candidates)
+            {
+                if (string.Equals(p.Str("uniqueName"), wanted, StringComparison.OrdinalIgnoreCase)) return p.Str("uniqueName");
+            }
+            foreach (var p in candidates)
+            {
+                if (string.Equals(p.Str("name"), wanted, StringComparison.OrdinalIgnoreCase)) return p.Str("uniqueName");
+            }
+            foreach (var p in candidates)
+            {
+                if (PathUtil.SamePath(p.Str("fullName"), wanted)) return p.Str("uniqueName");
+            }
+
+            var have = new List<string>();
+            foreach (var p in candidates) have.Add(p.Str("name"));
+            throw new BridgeException("No project named '" + wanted + "' in this solution. Projects: " +
+                (have.Count == 0 ? "none" : string.Join("; ", have.ToArray())) + ".");
+        }
+
+        private static void CollectSolutionProjects(dynamic projects, List<Json.JObj> into)
+        {
+            if (projects == null) return;
+            int count = ComHelpers.SafeInt(delegate { return projects.Count; }, 0);
+            for (int i = 1; i <= count; i++)
+            {
+                dynamic project = null;
+                try { project = projects.Item(i); }
+                catch { }
+                if (project != null) CollectOneProject(project, into);
+            }
+        }
+
+        // One project, plus anything nested under it: a solution folder holds its
+        // projects as ProjectItems[].SubProject, so the recursion is what finds them.
+        private static void CollectOneProject(dynamic project, List<Json.JObj> into)
+        {
+            string unique = ComHelpers.SafeStr(delegate { return project.UniqueName; });
+            string fullName = ComHelpers.SafeStr(delegate { return project.FullName; });
+            if (!string.IsNullOrWhiteSpace(unique) && !string.IsNullOrWhiteSpace(fullName))
+            {
+                var o = new Json.JObj();
+                o["name"] = ComHelpers.SafeStr(delegate { return project.Name; });
+                o["uniqueName"] = unique;
+                o["fullName"] = fullName;
+                into.Add(o);
+            }
+            dynamic items = null;
+            try { items = project.ProjectItems; }
+            catch { }
+            if (items == null) return;
+            int n = ComHelpers.SafeInt(delegate { return items.Count; }, 0);
+            for (int j = 1; j <= n; j++)
+            {
+                dynamic sub = null;
+                try { sub = items.Item(j).SubProject; }
+                catch { }
+                if (sub != null) CollectOneProject(sub, into);
+            }
         }
 
         // ---- error-list reading (port of XaeErrorListProbe, bridge L205-260) -
