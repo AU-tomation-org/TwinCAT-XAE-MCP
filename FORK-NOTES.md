@@ -215,6 +215,29 @@ solution printed seven identical `Debug` rows.
 
 ---
 
+## Change log — which commit carries which change
+
+`vs2022-support`, oldest first. The sections above say *why* each change exists; this
+table says *where it is*, which is what the upstream PRs get split along — one section
+per PR, so a reviewer never has to read a commit that belongs to another fix.
+
+| Date | Commit | Section | Change |
+|---|---|---|---|
+| 2026-08-27 | `34474ba` | §1 | Resolve the EnvDTE PIAs when TE1000 is integrated in VS2022 (no TcXaeShell install), plus `TE1000_PIA_DIR`. |
+| 2026-08-27 | `48ef41e` | §1 | Fix the `Visual Studio\20222\` typo in the daemon `.csproj` — MSB3245 on every build, while the runtime path in `VsInterop.cs` was right, so the error list worked anyway. |
+| 2026-08-27 | `fd7d147` | §5 | Resolve the IEC project node instead of assuming it, for the tools that need `ITcPlcIECProject` (`save_as_library` without a `treePath`). |
+| 2026-08-27 | `5d0f7b4` | §2, §3, §4, §6 | Severity filter that declares what TwinCAT cannot tell apart; `xae shutdown_ide`; solution paths compared as paths, not strings; `TE1000_MODE` (later `TE1000_DEFAULT_MODE`). |
+| 2026-08-27 | `f1d079c` | — | This file, linked from the README. |
+| 2026-08-27 | `57e7d89` | §7 | `xae list_instances` / `attach` / `forceNew`, and a session cache that honours the request instead of keying on `progId` alone. |
+| 2026-08-27 | `69fac74` | §7 | `shutdown_ide` honours an explicit instance target rather than closing whichever IDE the session happened to hold. |
+| 2026-09-01 | `87f8887` | — | [BACKLOG.md](BACKLOG.md): rough edges and missing capabilities measured in a full day of real use. |
+| 2026-09-02 | `4af5433` | §8, §9 | `xae list_projects` / `select_project`, per-call `tsProject`, `TE1000_DEFAULT_TSPROJECT`, ambiguity declared on reads and refused by the target-changing verbs; `list_configurations` / `set_configuration`, per-project `xae_build`, and the typed `PlatformName` read. |
+
+Upstream's own [CHANGELOG.md](CHANGELOG.md) is left untouched: it tracks their releases,
+and a fork writing into it would collide on every merge from `upstream`.
+
+---
+
 ## Things to know before using this (not bugs)
 
 - **Save before you build.** A `plc_pou` write lands in the IDE's in-memory copy. Build
