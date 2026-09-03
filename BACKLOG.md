@@ -89,6 +89,18 @@ window, which no tool exposes. In the case measured, the true cause (a library c
 against a stale base) was found only by opening that project's own solution and building
 it there. See missing capability 3.
 
+### 6. `BuildVInfo` carries two vInfo shapes
+
+Creating the members of a POU needs a `string[]` with the IEC language spelled out
+(`"ST"`), while the top-level POU types and the Property have always been created with an
+`object[]` holding the language as a number (FORK-NOTES §10). Both work, and only the
+first shape is what Beckhoff's own samples use everywhere.
+
+The `object[]` cases were left alone on purpose: they are the ones proven in daily use,
+and a preventive sweep would put the whole authoring path at risk to gain consistency and
+nothing else. Worth aligning the day something else already touches those cases — with
+602, 603, 604 and 611 all re-tested, not assumed.
+
 ---
 
 ## Missing capabilities, most valuable first

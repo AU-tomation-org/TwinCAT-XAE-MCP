@@ -213,6 +213,74 @@ set it. A solution left on `TwinCAT RT (x64)` builds RT while CI builds
 through raw IDispatch every configuration came back platform-less, which on a real
 solution printed seven identical `Debug` rows.
 
+### 10. The members of a POU — and of an interface — can be created
+
+`plc_pou create` could author a Program, a Function, a Function Block, a DUT, a GVL or a
+Property, but never a **Method**. Sub-type 609 failed on every project, with `language`
+and `returnType` passed or not:
+
+```
+The specified vInfo (Type: Object[]) is not supported for creating TreeItem type
+'TREEITEMTYPE_PLCMETHOD' on parent item type '604'
+```
+
+The message names the cause: the **type of the array**. `CreateChild` takes `vInfo` as a
+VARIANT and each TreeItem type parses it its own way. A C# `object[]` reaches COM as
+`SAFEARRAY(VARIANT)`, and the parser for the members of a POU wants `SAFEARRAY(BSTR)` —
+a `string[]` — with the IEC language as its **name** (`"ST"`), not as its
+`IECLANGUAGETYPES` number. Beckhoff's own scripting samples build a `string[]` for every
+one of them (`GeneratePlcProject.cs`: `AddMethod`, `AddAction`, `AddTransition`,
+`AddProperty`, `AddPropertyGet`, `AddPropertySet`).
+
+The shapes now sent:
+
+| sub-type | vInfo |
+|---|---|
+| 608 Action, 616 Transition | `string[]{ language, initial implementation }` |
+| 609 Method | `string[]{ language, return type, accessor, initial implementation }` |
+| 613 / 614 property Get / Set | `string[]{ language, accessor, initial implementation }` |
+| 610 interface Method, 612 interface Property | the return type, as a bare string |
+| 654 / 655 interface property Get / Set | nothing |
+
+Two parameters carry the new elements: **`accessor`**
+(`PUBLIC` \| `PRIVATE` \| `PROTECTED` \| `INTERNAL`, also honoured by 611) and
+**`implSeed`**, an initial implementation in TwinCAT wrapper XML — normally left out,
+since `set_impl` is the readable way to write a body. A method created with neither is
+still complete: `set_decl` rewrites the whole `METHOD PUBLIC Foo : BOOL` header.
+
+Sub-types **610, 612, 654 and 655 are new to the tool**. They are the only way to author
+an interface here: `set_document` is typed on `ITcPlcPou`, which a
+`TREEITEMTYPE_PLCITF` (618) does not implement, so the whole-document route that works
+for a Function Block gives `E_NOINTERFACE` on a `.TcIO`. An interface takes 610/612
+(+654/655), never 609/611.
+
+The accessors 613/614/654/655 may be created **without a name** — the samples pass `""`
+and the IDE names the child itself. The request asks for `Get`/`Set` explicitly, because
+`AssertWellFormedChild` compares the name that comes back against the one that went in
+and deletes the child when they differ.
+
+**The guard now asks the tree.** `AssertWellFormedChild` exists because `CreateChild` can
+report success while inserting a blank-named ghost, so it compared the name that came back
+against the one that went in. A Method created **with** an initial implementation trips
+that comparison while being perfectly created: declaration, accessor and body all land,
+and the reference handed back has a blank `Name`. Reporting that as a failure is the worst
+answer available — the object is in the tree, and a caller who believes the error and
+retries ends up with two. Before failing, the guard now resolves `parent^name` and, when
+the tree holds exactly what was asked for, reports that object instead. The tree is the
+authority on what was created; the returned reference is only a convenience. Refusals
+still refuse: a Method under a folder, or a Function Block under a Method, come back as
+the Automation Interface's own *"Creating the child type ... is not possible on parent
+node type ..."*.
+
+Measured on a scratch solution with a separate daemon: 17 creations covering every
+sub-type above, both accessors nameless, `implSeed` on 608/609/616, the two new
+validations refusing, `allObjectsValid` true, and nothing left behind after the delete.
+
+What was deliberately **not** touched: 602 Program, 603 Function, 604 Function Block and
+611 Property keep the `object[]` form with the numeric language. That form is what this
+bridge has always sent and what is proven in daily use; the two shapes coexisting is the
+Automation Interface's asymmetry, not ours, and the comment on `BuildVInfo` says so.
+
 ---
 
 ## Change log — which commit carries which change
@@ -232,6 +300,7 @@ per PR, so a reviewer never has to read a commit that belongs to another fix.
 | 2026-08-27 | `69fac74` | §7 | `shutdown_ide` honours an explicit instance target rather than closing whichever IDE the session happened to hold. |
 | 2026-09-01 | `87f8887` | — | [BACKLOG.md](BACKLOG.md): rough edges and missing capabilities measured in a full day of real use. |
 | 2026-09-02 | `4af5433` | §8, §9 | `xae list_projects` / `select_project`, per-call `tsProject`, `TE1000_DEFAULT_TSPROJECT`, ambiguity declared on reads and refused by the target-changing verbs; `list_configurations` / `set_configuration`, per-project `xae_build`, and the typed `PlatformName` read. |
+| 2026-09-03 | `TBD` | §10 | `string[]` vInfo for the members of a POU, so 609 Method, 608 Action and 616 Transition can be created; `accessor` and `implSeed`; interface members 610 / 612 / 654 / 655; accessors may omit their name; the create guard resolves the tree before declaring a failure. |
 
 Upstream's own [CHANGELOG.md](CHANGELOG.md) is left untouched: it tracks their releases,
 and a fork writing into it would collide on every merge from `upstream`.

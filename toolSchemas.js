@@ -336,7 +336,7 @@ const toolSchemas = {
   plc_pou: {
     description:
       "PLC object authoring + code edit on the open solution (OFFLINE engineering only — edits land in-memory and reach a runtime only via a later guarded plc_download + twincat_restart_runtime). Tree paths use ^ separators; safety (TISC-rooted) paths are rejected by policy. " +
-      "CREATE — create / create_batch (parent, name, subType, language?, returnType?, extends?, implements?, declText?, before?): CreateChild sub-types 602 Program, 603 Function (returnType required), 604 FunctionBlock, 605 Enum, 606 Struct, 607 Union, 608 Action, 609 Method, 611 Property (returnType required), 615 GVL, 616 Transition, 618 Interface, 619 Visualization, 623 Alias, 629 ParameterList, 631 UML. language IECLANGUAGETYPES 0 NONE/1 ST/2 IL/3 SFC/4 FBD/5 CFC/6 LD (default 1). extends/implements for FB 604 / Program 602 derivation (618 uses extends as its base); declText seeds DUT/GVL decl. For code POUs prefer set_decl after create. " +
+      "CREATE — create / create_batch (parent, name, subType, language?, returnType?, accessor?, extends?, implements?, declText?, implSeed?, before?): CreateChild sub-types 602 Program, 603 Function (returnType required), 604 FunctionBlock, 605 Enum, 606 Struct, 607 Union, 608 Action, 609 Method, 610 interface Method, 611 Property (returnType required), 612 interface Property (returnType required), 613 property Get, 614 property Set, 615 GVL, 616 Transition, 618 Interface, 619 Visualization, 623 Alias, 629 ParameterList, 631 UML, 654 interface property Get, 655 interface property Set. language IECLANGUAGETYPES 0 NONE/1 ST/2 IL/3 SFC/4 FBD/5 CFC/6 LD (default 1). extends/implements for FB 604 / Program 602 derivation (618 uses extends as its base); declText seeds DUT/GVL decl. MEMBERS of a POU (608 Action, 609 Method, 616 Transition, 613/614 accessors) are created UNDER it — parent is the POU's ^ path, not the folder's; an INTERFACE takes 610/612 (+654/655), never 609/611. accessor (PUBLIC|PRIVATE|PROTECTED|INTERNAL) applies to 609/611/613/614; 613/614/654/655 may omit name (defaults Get/Set). implSeed is an initial implementation in TwinCAT wrapper XML (e.g. <ST><![CDATA[(* body *)]]></ST>) for 608/609/613/614/616 — normally omitted, use set_impl after create. For code POUs prefer set_decl after create. " +
       "FOLDERS — create_folder (parent, name, before?) creates a PLC folder (sub-type 601) under parent (a PLC subtree node, POUs/DUTs/GVLs container, or another folder); returns the same shape as create. create_folder_batch (creates:[{parent,name,before?}], save?) loops continue-on-error, returns {count,succeeded,failed,results} KEEPING success rows (each carries the created child identity) — list a parent-folder entry before its child (array order). create / create_batch already author INTO a folder when parent is the folder's path — no separate action needed. " +
       "TEMPLATE — import_template (parent, paths[]) imports POU template file(s) (CreateChild sub-type 58). " +
       "READ (cheap-first: outline for structure; get_decl/get_impl with grep{} or range{} to slice; full text only when the whole body is needed — a large full read returns a hint nudging the next call to slice) — get_decl / get_impl / get_document / get_graphical (path). get_decl/get_impl take an optional range {start,end} (1-based inclusive line slice, clamped) OR grep {pattern, context?} (regex over lines + context each side); mutually exclusive; default full text. Both report lineCount; get_impl also returns language (textual 1 ST/2 IL; graphical 3 SFC/4 FBD/5 CFC/6 LD -> lineCount:0 + {graphical:true, hint}). get_graphical (path) READ-ONLY inspects a graphical (LD/FBD/SFC/CFC) body: returns {language,languageName,itemType,source,readOnly,xml} where xml is the object's <Implementation> network XML (NWL 'BoxTree' for LD/FBD/IL, or the SFC/CFC archive), pulled live from the POU document (for an Action/Method/Transition it reads the PARENT POU's document, since get_document/GetDocumentXml only work on a top-level POU). Diagnostic only — graphical bodies are NOT text-editable; change them in the XAE GUI. Refuses textual languages (use get_impl). outline (path) returns structure WITHOUT full text: header + varBlocks + child code items. " +
@@ -364,6 +364,8 @@ const toolSchemas = {
       extends: z.string().optional(),
       implements: z.string().optional(),
       declText: z.string().optional(),
+      accessor: z.string().optional().describe("create: PUBLIC|PRIVATE|PROTECTED|INTERNAL; 609 Method, 611 Property, 613 Get, 614 Set"),
+      implSeed: z.string().optional().describe("create: initial implementation in TwinCAT wrapper XML, e.g. <ST><![CDATA[(* body *)]]></ST>; 608/609/613/614/616 only"),
       before: z.union([z.string(), z.number().int()]).optional().describe("create: sibling name to insert before (string). insert: 1-based line to insert before (int, alias of at)"),
       paths: z.array(z.string()).optional(),
       path: z.string().optional(),
@@ -380,6 +382,8 @@ const toolSchemas = {
         extends: z.string().optional(),
         implements: z.string().optional(),
         declText: z.string().optional(),
+        accessor: z.string().optional(),
+        implSeed: z.string().optional(),
         before: z.string().optional(),
       })).optional(),
       items: z.array(z.object({

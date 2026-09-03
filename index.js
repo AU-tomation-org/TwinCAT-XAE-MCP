@@ -562,7 +562,7 @@ server.registerTool(
         return textResult(await bridgeCall("plc_pou_create", {
           parent: p.parent, name: p.name, subType: p.subType, language: p.language,
           returnType: p.returnType, extends: p.extends, implements: p.implements,
-          declText: p.declText, before: p.before,
+          declText: p.declText, accessor: p.accessor, implSeed: p.implSeed, before: p.before,
         }));
       case "create_batch":
         need(p, ["creates"], p.action);

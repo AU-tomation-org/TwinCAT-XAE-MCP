@@ -1353,9 +1353,11 @@ namespace Te1000Daemon
             string parent = entry.Str("parent");
             string name = entry.Str("name");
             if (string.IsNullOrWhiteSpace(parent)) throw new BridgeException("parent is required");
-            if (string.IsNullOrWhiteSpace(name)) throw new BridgeException("name is required");
             if (!entry.Has("subType") || entry["subType"] == null) throw new BridgeException("subType is required");
             int subType = entry.Int("subType", 0);
+            // Property accessors are the one case the IDE names itself; let the caller omit it.
+            if (string.IsNullOrWhiteSpace(name)) name = DefaultAccessorName(subType);
+            if (string.IsNullOrWhiteSpace(name)) throw new BridgeException("name is required");
             PathUtil.AssertNotSafetyPath(parent);
 
             int language = (entry.Has("language") && entry["language"] != null) ? entry.Int("language", 1) : 1;
@@ -1363,14 +1365,15 @@ namespace Te1000Daemon
             string extends = (entry.Has("extends") && entry["extends"] != null) ? entry.Str("extends") : null;
             string implements = (entry.Has("implements") && entry["implements"] != null) ? entry.Str("implements") : null;
             string declText = (entry.Has("declText") && entry["declText"] != null) ? entry.Str("declText") : null;
+            string accessor = (entry.Has("accessor") && entry["accessor"] != null) ? entry.Str("accessor") : null;
+            string implSeed = (entry.Has("implSeed") && entry["implSeed"] != null) ? entry.Str("implSeed") : null;
             string before = entry.Truthy("before") ? entry.Str("before") : "";
 
             dynamic parentItem = ComHelpers.GetTreeItem(sm, parent);
-            object vInfo = BuildVInfo(subType, language, returnType, extends, implements, declText);
+            object vInfo = BuildVInfo(subType, language, returnType, extends, implements, declText, accessor, implSeed);
 
             dynamic child = parentItem.CreateChild(name, subType, before, vInfo);
-            AssertWellFormedChild(parentItem, child, name, subType, parent);
-            return child;
+            return AssertWellFormedChild(sm, parentItem, child, name, subType, parent);
         }
 
         // ---- Invoke-PlcPouCreateFolder (L2762-2788) -------------------------
@@ -1385,12 +1388,27 @@ namespace Te1000Daemon
 
             dynamic parentItem = ComHelpers.GetTreeItem(sm, parent);
             dynamic child = parentItem.CreateChild(name, 601, before, null);
-            AssertWellFormedChild(parentItem, child, name, 601, parent);
-            return child;
+            return AssertWellFormedChild(sm, parentItem, child, name, 601, parent);
         }
 
         // ---- New-PlcPouVInfo (L2652-2724) -----------------------------------
-        private static object BuildVInfo(int subType, int language, string returnType, string extends, string implements, string declText)
+        // Two shapes live here on purpose.
+        //
+        // CreateChild takes vInfo as a VARIANT and every TreeItem type parses it its own way.
+        // The top-level POU types (602/603/604) and the Property (611) accept an object[]
+        // carrying the IEC language as a NUMBER - that is what this bridge has always sent and
+        // what is proven in the field, so it stays. The MEMBERS of a POU (Action, Method,
+        // Transition, property accessors) refuse that outright:
+        //   The specified vInfo (Type: Object[]) is not supported for creating TreeItem type
+        //   'TREEITEMTYPE_PLCMETHOD' on parent item type '604'
+        // They want a SAFEARRAY of BSTR - a C# string[] - with the language as its NAME ("ST").
+        // Reference: the Beckhoff scripting samples (GeneratePlcProject.cs, AddMethod /
+        // AddAction / AddTransition / AddProperty / AddPropertyGet / AddPropertySet) build a
+        // string[] for every one of them.
+        //
+        // Interface members are different again: 610/612 take the return type as a bare string
+        // and their accessors 654/655 take nothing at all.
+        private static object BuildVInfo(int subType, int language, string returnType, string extends, string implements, string declText, string accessor, string implSeed)
         {
             switch (subType)
             {
@@ -1398,8 +1416,12 @@ namespace Te1000Daemon
                     if (string.IsNullOrWhiteSpace(returnType)) throw new BridgeException("returnType is required for Function (subType 603)");
                     return new object[] { language, returnType };
                 case 611:
+                {
                     if (string.IsNullOrWhiteSpace(returnType)) throw new BridgeException("returnType is required for Property (subType 611)");
-                    return new object[] { language, returnType };
+                    string propAccessor = AccessorName(accessor);
+                    if (propAccessor.Length == 0) return new object[] { language, returnType };
+                    return new object[] { language, returnType, propAccessor };
+                }
                 case 604:
                 case 602:
                 {
@@ -1409,10 +1431,45 @@ namespace Te1000Daemon
                     if (!string.IsNullOrWhiteSpace(implements)) { info.Add("Implements"); info.Add(implements); }
                     return info.ToArray();
                 }
-                case 608:
                 case 609:
+                {
+                    // Method: { language, return type, accessor, initial implementation }
+                    var info = new string[4];
+                    info[0] = LanguageName(language);
+                    info[1] = returnType ?? string.Empty;   // empty = no return value
+                    info[2] = AccessorName(accessor);
+                    if (!string.IsNullOrEmpty(implSeed)) info[3] = implSeed;
+                    return info;
+                }
+                case 608:
                 case 616:
-                    return new object[] { language };
+                {
+                    // Action / Transition: { language, initial implementation }
+                    var info = new string[2];
+                    info[0] = LanguageName(language);
+                    if (!string.IsNullOrEmpty(implSeed)) info[1] = implSeed;
+                    return info;
+                }
+                case 613:
+                case 614:
+                {
+                    // Property Get / Set: { language, accessor, initial implementation }
+                    var info = new string[3];
+                    info[0] = LanguageName(language);
+                    info[1] = AccessorName(accessor);
+                    if (!string.IsNullOrEmpty(implSeed)) info[2] = implSeed;
+                    return info;
+                }
+                case 610:
+                    // Interface method: the return type, on its own. Empty = no return value.
+                    return returnType ?? string.Empty;
+                case 612:
+                    if (string.IsNullOrWhiteSpace(returnType)) throw new BridgeException("returnType is required for an interface Property (subType 612)");
+                    return returnType;
+                case 654:
+                case 655:
+                    // Interface property Get / Set: declaration only, nothing to seed.
+                    return null;
                 case 618:
                     if (string.IsNullOrWhiteSpace(extends)) return null;
                     return extends;
@@ -1429,25 +1486,79 @@ namespace Te1000Daemon
             }
         }
 
+        // The string[] vInfo shapes want the IEC language by NAME, not by IECLANGUAGETYPES
+        // number (the Beckhoff samples call IECLanguageType.AsString(), i.e. the member name).
+        private static string LanguageName(int language)
+        {
+            switch (language)
+            {
+                case 0: return "None";
+                case 1: return "ST";
+                case 2: return "IL";
+                case 3: return "SFC";
+                case 4: return "FBD";
+                case 5: return "CFC";
+                case 6: return "LD";
+                default:
+                    throw new BridgeException("language must be 0 None, 1 ST, 2 IL, 3 SFC, 4 FBD, 5 CFC or 6 LD (got " +
+                        language.ToString(CultureInfo.InvariantCulture) + ")");
+            }
+        }
+
+        // PLCACCESS as the Automation Interface spells it. Blank means "leave it to the IDE".
+        private static string AccessorName(string accessor)
+        {
+            if (string.IsNullOrWhiteSpace(accessor)) return string.Empty;
+            string a = accessor.Trim().ToUpperInvariant();
+            if (a != "PUBLIC" && a != "PRIVATE" && a != "PROTECTED" && a != "INTERNAL")
+                throw new BridgeException("accessor must be PUBLIC, PRIVATE, PROTECTED or INTERNAL (got '" + accessor + "')");
+            return a;
+        }
+
+        // A property accessor is created nameless in the Beckhoff samples and the IDE names it
+        // Get / Set. AssertWellFormedChild compares the returned name against the requested one,
+        // so ask for the name the tree will actually carry.
+        private static string DefaultAccessorName(int subType)
+        {
+            switch (subType)
+            {
+                case 613:
+                case 654:
+                    return "Get";
+                case 614:
+                case 655:
+                    return "Set";
+                default:
+                    return null;
+            }
+        }
+
         // ---- Assert-WellFormedChild (L3192-3241) ----------------------------
-        private static void AssertWellFormedChild(dynamic parent, dynamic child, string requestedName, int subType, string parentPath)
+        // Returns the child to report on: the reference CreateChild handed back when it is
+        // well formed, otherwise whatever the TREE holds at parent^name. The tree, not the
+        // returned reference, is the authority on what was created - measured on a Method
+        // created with an initial implementation (609 with the 4th vInfo element), which
+        // lands complete, declaration and body, while handing back a blank-named reference.
+        // Reporting that as a failure is the worst answer available: the object is there, and
+        // a caller who believes the error and retries ends up with two.
+        private static dynamic AssertWellFormedChild(dynamic sm, dynamic parent, dynamic child, string requestedName, int subType, string parentPath)
         {
             string childActualName = ComHelpers.SafeStr(MakeNameGetter(child));
             string childPath = ComHelpers.SafeStr(MakeStrGetter(child, "PathName"));
+            string expectedPath = parentPath + "^" + requestedName;
 
             string reason = null;
             if (child == null) reason = "CreateChild returned null";
             else if (string.IsNullOrWhiteSpace(childActualName)) reason = "returned child has a blank name";
             else if (childActualName != requestedName)
                 reason = "returned child name '" + childActualName + "' does not match requested name '" + requestedName + "'";
-            else
-            {
-                string expectedPath = parentPath + "^" + requestedName;
-                if (!string.IsNullOrWhiteSpace(childPath) && childPath != expectedPath)
-                    reason = "returned child path '" + childPath + "' is not under requested parent (expected '" + expectedPath + "')";
-            }
+            else if (!string.IsNullOrWhiteSpace(childPath) && childPath != expectedPath)
+                reason = "returned child path '" + childPath + "' is not under requested parent (expected '" + expectedPath + "')";
 
-            if (reason == null) return;
+            if (reason == null) return child;
+
+            dynamic settled = ComHelpers.TryGetTreeItem(sm, expectedPath);
+            if (settled != null && ComHelpers.SafeStr(MakeNameGetter(settled)) == requestedName) return settled;
 
             if (!string.IsNullOrWhiteSpace(childActualName))
             {
