@@ -180,6 +180,34 @@ the caller's job and is easy to forget.
 `RunStaticAnalysis()` + `ExportToSarif()` and doc generation, as listed in FORK-NOTES.
 These are what still forces the CI to shell out to TcCIBuilder.
 
+### 7. Get the data out of a Scope recording
+
+`tc_measurement` can create a Scope project, add children, rename them and start/stop a
+recording — but there is no way to **retrieve what was recorded**. `IMeasurementScope`
+exposes `SaveSVD`, `ExportCSV` and `LookUpChild`, and `MeasurementActions.cs` deliberately
+leaves all three unexposed, marked UNVERIFIED.
+
+That gap is what stops the obvious workflow: record a machine cycle, export it, compare it
+against the previous run. Start/stop without export is a button, not a measurement.
+
+Verification is cheap — add a Scope project to a throwaway solution, record a few seconds
+of one channel, and call the three by reflection the way `ScopeHelper` already calls
+`CreateChild` / `ChangeName` / `StartRecord` / `StopRecord`. What has to be pinned down
+before exposing them:
+
+- the **signatures** (return code plus out-parameters, or a plain return?) — the four
+  verified ones return an `int` rc, so assume the same shape until measured;
+- whether `SaveSVD` / `ExportCSV` take an **absolute path**, and what they do when the
+  file exists (silently overwrite is the likely answer, and the verb should say so);
+- whether either call is **synchronous** — an export that returns before the file is
+  complete would hand the caller a truncated read, which is the kind of failure that looks
+  like corrupt data;
+- whether they can be called **while recording**, or only after `StopRecord`.
+
+Same note as `analytics_create`: the recording has to exist before any of this means
+anything, so the test solution needs a live target and a real channel, not just the project
+node.
+
 ---
 
 ## Not the server's problem
