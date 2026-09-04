@@ -35,19 +35,43 @@ that pkgdef (its path is stable relative to the VS install), or probe a small ra
 suffixes and keep the one that answers. A hardcoded name is a silent break on the next TE2000
 upgrade, and it will look like "the HMI package is not installed".
 
-### Symmetry with the XAE side
+### How the neighbours are reached — measured, not assumed
 
-The system manager is a DTE automation object too, named **`TcSysManager`** — which this
-daemon already uses as its fallback in `ComSession.GetSysManager` when the solution holds no
-`.tsproj`. (`TcatSysManager` is *not* a valid name here: it returns `DISP_E_MEMBERNOTFOUND`.)
+Three different acquisition patterns live in one solution. Getting this wrong looks like
+"the product is not installed", so it is worth writing down.
 
-So both families are reached the same way, from the same `DTE`, and belong in the **same COM
-session on the same STA thread**. That is the main architectural consequence: this is a new
-family of verbs inside this server, not a second MCP server. Two servers attaching to one IDE
-reintroduce exactly the orphaned-devenv and ROT-ambiguity problems that FORK-NOTES sections 3
-and 7 exist to solve.
+| surface | how you get it | interface |
+|---|---|---|
+| HMI (TE2000) | `dte.GetObject("Beckhoff.TcHmi.1.12")` | `ITcHmiAutomation` |
+| System manager (XAE) | `project.Object` per project; `dte.GetObject("TcSysManager")` as the solution-wide fallback this daemon already uses | `ITcSysManager` |
+| Measurement / Scope (TE130X) | `project.Object` **only** — there is no DTE automation object | `IMeasurementScope` |
 
----
+`TcatSysManager` is *not* a valid name (`DISP_E_MEMBERNOTFOUND`); the working one is
+`TcSysManager`.
+
+The full list of automation objects the installed Beckhoff packages register, swept out of the
+`.pkgdef` files under `Common7\IDE\Extensions\` and then each one probed against a live IDE:
+
+| package | name | probe |
+|---|---|---|
+| TwinCAT HMI | `Beckhoff.TcHmi.1.12` | answers |
+| TwinCAT XAE Base | `TcProjects` — *"Project Collection for TwinCAT SystemManager Automation"* | answers, `Count` = 3 on a 4-project solution — **unexplored**, and possibly a cleaner project enumerator than walking `Solution.Projects` |
+| TwinCAT XAE Integration | `BeckhoffXaeHelperPackageGeneral` | answers — unexplored |
+
+Nothing is registered for Measurement, which is why `MeasurementActions.cs` resolves
+`IMeasurementScope` from the project node instead. That file is also where the sharpest
+neighbouring lesson already lives: **`IMeasurementScope` is a vtable/IUnknown interface and
+cannot be late-bound through `dynamic`**, so it is invoked by reflection against the interface
+type found by name in the loaded `TwinCAT.Measurement.AutomationInterface.dll`. `ITcHmiAutomation`
+is not in that category — it is a dispatch interface and answers late-bound calls — but its
+*children* (`ITcHmiProject`, `ITcHmiFile`, …) were only exercised late-bound from PowerShell,
+where property reads came back empty. Assume nothing until the daemon binds them early.
+
+So both families are reached from the same `DTE` and belong in the **same COM session on the
+same STA thread**. That is the main architectural consequence: this is a new family of verbs
+inside this server, not a second MCP server. Two servers attaching to one IDE reintroduce
+exactly the orphaned-devenv and ROT-ambiguity problems that FORK-NOTES sections 3 and 7 exist
+to solve.
 
 ## 2. It is real COM, so bind early
 
