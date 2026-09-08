@@ -184,6 +184,62 @@ compile.
 
 ---
 
+## 3-bis. `AddUserControl` exercised for real, 2026-09-08 — and it works late-bound
+
+The first mutating call of this family actually used in anger, driving the live IDE from
+Windows PowerShell 5.1 to create the `SafetyCircuit` control of `AUT_Workbench_HMI`. It
+settles two of the doubts above and adds one argument for the verb.
+
+```powershell
+$dte  = [Runtime.InteropServices.Marshal]::GetActiveObject('VisualStudio.DTE.17.0')
+$hmi  = $dte.GetObject('Beckhoff.TcHmi.1.12')
+$proj = @($hmi.GetHmiProjects())[0]
+$file = $proj.AddUserControl('UserControls\SafetyCircuit.usercontrol')   # returns ITcHmiFile
+$hmi.SaveAllFiles()
+```
+
+- **METHODS dispatch late-bound; only property READS come back empty.** Section 2 says the
+  children were "only exercised late-bound from PowerShell, where property reads came back
+  empty" and warns to assume nothing. Now measured: `IsReady()` answers, `AddUserControl`
+  does the whole job, `SaveAllFiles` works. What stays empty is exactly what section 3 says
+  is empty — `ITcHmiProjectInformation.Name` and friends. **Bind early for reading, but a
+  write verb does not need it**, which lowers the cost of the first `hmi_*` verbs
+  considerably.
+- **The path is project-relative, with backslashes and the extension**:
+  `UserControls\SafetyCircuit.usercontrol`. The `.usercontrol.json` is created alongside,
+  unasked.
+- **It writes THREE registrations, and that is the argument for the verb**, stronger than
+  section 5 puts it. Creating one user control touched:
+
+  | file | what it got |
+  |---|---|
+  | `<proj>.hmiproj` | two `<Content Include>` items, the `.json` carrying `<DependentUpon>` |
+  | `Properties\tchmiconfig.json` | an entry in the user-control list, `{"url": "UserControls/SafetyCircuit.usercontrol"}` |
+  | `Properties\tchmi.project.Schema.json` | the control's own definition, `tchmi:project#/definitions/SafetyCircuit`, with `frameworkUserControlConfig` pointing at the `.json` |
+
+  A hand-written file plus a hand-written `.hmiproj` entry — the obvious shortcut — gets one
+  of the three and silently loses the other two.
+- **A modal dialog never appeared**, so `SuppressUi` was not needed for this call. The
+  DialogWatcher stays the safety net for `Publish`, which is where section 6 says the
+  trouble is.
+
+### And a trap for whatever `hmi_project build` returns
+
+**An HMI project build stays GREEN with a misspelled binding attribute.** Measured the same
+day: `data-tchmi-ctrljsondata` renamed to `data-tchmi-ctrljsondataBROKEN` on a
+`TcHmiUserControlHost`, build run, `lastBuildInfo` **0** and an empty Error List. So a build
+verdict on this family means "the project packages", not "the bindings are wired" — the same
+shape of false green as `xae_build` on a PLC **library** project (FORK-NOTES, and
+`tc-build-install` §4b). Any `hmi_project` verb must say so, or its callers will read a green
+build as a working panel.
+
+Related, and worth a verb of its own eventually: **symbols are resolved from an explicit
+list**, `Server\TcHmiSrv\TcHmiSrv.Config.default.json`, not dynamically. A binding onto a
+symbol nobody declared is null at run time and silent at build time. That is `hmi_symbol`
+(section 4, item 2), and it is more valuable than its ranking suggests.
+
+---
+
 ## 4. Where it plugs into this codebase
 
 | concern | file today | what HMI needs |
