@@ -44,6 +44,7 @@ namespace Te1000Daemon
             LicenseVariantActions.Register(_handlers);
             NcActions.Register(_handlers);
             SessionDownloadActions.Register(_handlers);
+            HmiActions.Register(_handlers);
         }
 
         // Default per-call ceiling (ms). The legacy bridge left its wall-clock

@@ -283,6 +283,159 @@ Automation Interface's asymmetry, not ours, and the comment on `BuildVInfo` says
 
 ---
 
+### 11. TwinCAT HMI (TE2000) — a family of verbs for the HMI side
+
+The server drove the PLC side of a solution and none of the HMI side, so anything
+touching a view, a symbol mapping or a Function fell back to editing files by hand. That
+is not a small gap: an HMI project is an MSBuild project with explicit `<Content Include>`
+items, and the publish task is handed `@(Folder);@(Content)` — there is no directory scan
+anywhere in the pipeline. **A file on disk that the `.hmiproj` does not declare does not
+exist for build or publish, and nothing reports it.**
+
+Adds the tools `hmi_project`, `hmi_symbol`, `hmi_function` and `hmi_publish`, the daemon
+files `HmiInterop.cs` and `Actions/HmiActions.cs`, and teaches `ComSession` to cache the
+HMI automation object beside the sysmanager and to walk the solution for `.hmiproj` nodes
+as well as `.tsproj` ones.
+
+**Why it belongs in this server rather than a second one.** The HMI automation object is
+reached with `dte.GetObject(<ProgId>)` off the same `DTE` this daemon already holds, so it
+lives in the same COM session on the same STA thread, behind the same message filter and
+the same dialog watcher. A separate MCP server attaching to the same IDE for HMI work
+would reintroduce exactly the orphaned-devenv and ROT-ambiguity problems that §3 and §7
+exist to solve.
+
+#### The ProgId is not guessable, and not the version you would guess
+
+The object is registered by the TE2000 VS package under a versioned ProgId, in
+`…\Common7\IDE\Extensions\…\TwinCAT HMI\TcHmiPackage.pkgdef`:
+
+```
+[$RootKey$\Packages\{16a09aeb-7616-4147-ab22-721f8fb090fc}\Automation]
+"Beckhoff.TcHmi.1.12"=""
+```
+
+The suffix is the TcHmi **platform generation**, and it does **not** track the product.
+Measured 2026-09-08 on one machine: HMI framework `14.4.70`, Controls `14.6.28`, VS
+package stamped `14.3.995.1` — ProgId still `1.12`. The same `1.12` is what TE2000 writes
+into the pkgdef it ships **for VS2026**, and the same `1.12` is the runtime moniker inside
+the framework package (`runtimes\native1.12-tchmi\`). Probed against a live IDE, `1.10`,
+`1.11`, `1.13`, `1.14`, `1.15` and `2.0` all answer `DISP_E_MEMBERNOTFOUND`; only `1.12`
+hands out an object.
+
+`HmiInterop` therefore reads the name out of the pkgdef of the IDE it is attached to (then
+the copies in the TE2000 install, then a short probe list, with `TE2000_HMI_PROGID` as an
+override) and reports which route answered. **Trap: those pkgdef files are UTF-16.** A
+plain text read — or a `grep` — finds nothing in them, and the resolution then looks
+exactly like "TE2000 is not installed".
+
+#### Late binding works for methods; the empty property reads were a wrong name
+
+`MeasurementActions` has to reach `IMeasurementScope` by reflection because it is a
+vtable/IUnknown interface `dynamic` cannot touch, and an earlier HMI spike reported that
+these children "came back empty" late-bound too. That was not a marshalling limit:
+`ITcHmiProject` has no `Name` property at all, and the name lives on
+`GetProjectInformation().ProjectName`. Bound late, that reads fine — as do `IsReady`,
+every `Change*` setter, `GetMappedSymbols`, `Build` and `AddUserControl`. This family
+needs no reflection shim.
+
+One interface genuinely does not marshal: **`ITcHmiInternalSymbol`**. All four routes
+fail — `GetInternalSymbolInstance()` gives *Specified cast is not valid*,
+`GetInternalSymbolInstance_2()` gives *Missing parameter does not have a default value*
+(so `_2` is the 5-argument overload), and the 5-argument call on either name fails the
+cast. Creating an internal symbol is therefore **not exposed**. `ITcHmiMappedSymbol` reads
+and maps perfectly well, and those verbs are.
+
+Overloads in general do not survive IDispatch under one name, so where the API has them
+the daemon tries the plain name, then the `_2` sibling, and reports which answered
+(`hmiProjectResolvedBy` on every response). Here `GetHmiProject(EnvDTE.Project)` is the
+one that answers.
+
+#### What the verbs do, and the things that are not obvious
+
+`hmi_project` — list / info / `add_view` / `add_usercontrol` / `add_content` /
+`add_theme` / `add_localization` / config get+set / build / save. Project selection
+mirrors the `.tsproj` machinery one kind over: HMI projects get their own `hmiProject`
+parameter, a single project is used automatically, and with several and none named reads
+take the first and flag `hmiProjectAmbiguous` while writes refuse and list them.
+
+1. **One add writes several registrations.** Creating a user control touches the
+   `.hmiproj` (two `<Content Include>` items), `Properties\tchmiconfig.json` (the
+   user-control list) and `Properties\tchmi.project.Schema.json` (the control's own
+   definition). A hand-written file plus a hand-written `.hmiproj` entry gets one of the
+   three and silently loses the others, so the verb reads all of them back off disk and
+   reports which landed.
+2. **`ChangeConfig(field, object)` is a trap; the typed setters are not.** The generic
+   setter casts the VARIANT to the field's own type inside itself, so a JSON number
+   arriving as a double dies with a bare *"Specified cast is not valid"* naming neither
+   the field nor the type. Each of the eight fields has a typed setter (`ChangeTheme`,
+   `ChangeWebsocketTimeout`, …); those are what `config_set` calls, and every response
+   carries a readback.
+3. **A green HMI build means the project packages, not that it works.** Measured
+   2026-09-08: `data-tchmi-ctrljsondata` renamed to `…BROKEN` on a
+   `TcHmiUserControlHost`, build run, `lastBuildInfo` **0** and an empty Error List. The
+   same false green as `xae_build` on a PLC library, so `hmi_project build` carries the
+   caveat in its own response rather than leaving callers to remember it.
+
+`hmi_symbol` — list / map / unmap over `ITcHmiServer(3)`. Worth a verb because mapped
+symbols are an **explicit** list in `Server\TcHmiSrv\TcHmiSrv.Config.default.json`, not a
+live discovery: a binding onto a symbol nobody mapped is null at run time and silent at
+build time. In-process with the PLC side, the schema `$ref` can eventually be derived from
+the PLC symbol table instead of guessed.
+
+`hmi_function` — the one with no API behind it. There is **no `AddFunction`**: views, user
+controls, themes, localizations and content have first-class verbs, Functions do not. And
+`ChangeConfig` cannot stand in — `ConfigFields` holds eight members, none of them the
+function lists. Meanwhile a Function's name lives in **nine** places (the two file names;
+`function <N>` and `registerFunctionEx('<N>', …)` in the source; `function.name`,
+`function.displayName` and `dependencyFiles[0].name` in the descriptor;
+`dependencyFiles[].name` and `userFunctions[].url` in `tchmiconfig.json`) plus two
+`<Content Include>` entries — and the IDE's own rename aligns only part of them *and*
+deletes module-scope variables declared outside the function body. Two measurements shape
+the implementation, and both were mistakes the first version made:
+
+- **Add the source to the collection of the folder it lives in, and add only the source.**
+  `project.ProjectItems.AddFromFile` targets the project ROOT: the HMI project system
+  answers it by copying the file up to the root and declaring the copy, then raises a
+  modal *"a file with the same name already exists, overwrite?"* on the second file. And
+  adding the descriptor at all is wrong even in the right collection — the project system
+  pulls it in itself when the `.ts` arrives, nesting it `DependentUpon` the source and
+  writing **both** `tchmiconfig` registrations. Adding it explicitly on top of that leaves
+  a second declared descriptor, `X - Copy.function.json`.
+- **Rename the source, not the descriptor.** The descriptor is declared `DependentUpon`
+  the `.ts`, and the project system cascades a rename from parent to dependent. Rename the
+  `.ts` and everything follows correctly; rename the descriptor first and the cascade
+  renames the source to `<new>.function.json.ts` and writes that stem into
+  `tchmiconfig.json` — silently.
+
+So the verb writes the files, adds the source, **checks** what the project system did, and
+fills in only what it did not. Where a check could raise a false alarm it is bound to the
+whole token: a leftover-name check on `Functions/<old>` reports the new
+`Functions/<old>Two.js` as residue, and a false alarm on a correct rename is worse than no
+check at all.
+
+`hmi_publish` — profiles / publish / result, gated on `ALLOW_HMI_PUBLISH` because one
+`TcHmiSrv` instance hosts **one** project and a publish replaces whatever it was serving.
+The interesting part is the pre-flight. With `serverExtensions` populated — which is what
+the IDE's publish dialog writes — a publish succeeds, uploads the project, and does **not**
+push the server-extension configuration: the ADS runtimes block stays at the server
+default and every symbol is null. That has to be caught before the call, because
+`ITcHmiPublishResult` carries only `Result`, `IsCompleted` and `SubmissionId` (read by
+reflection over the shipped assembly) — there is no per-extension verdict, so a green
+publish means the upload ran, not that the configuration landed. The verb refuses such a
+profile unless `force:true`, names the cure (`"serverExtensions": []`), and says in its own
+response how to confirm on the server storage.
+
+**What was exercised**, on a throwaway copy of a real HMI project driven by a separate
+daemon on its own pipe: project list and info; item creation for all three kinds plus the
+two refusals; function create and rename with all nine identity points checked on disk;
+mapped-symbol listing (60 symbols); `config_set` with readback for a string, a number and
+an enum, plus the two refusals; build; publish-profile reading; and the four tools end to
+end through the MCP front, including the publish confirmation gate. **`hmi_publish
+publish` itself was NOT run**: it would have replaced a live server instance, and there
+was nothing safe to publish to.
+
+---
+
 ## Change log — which commit carries which change
 
 `vs2022-support`, oldest first. The sections above say *why* each change exists; this
@@ -301,6 +454,7 @@ per PR, so a reviewer never has to read a commit that belongs to another fix.
 | 2026-09-01 | `87f8887` | — | [BACKLOG.md](BACKLOG.md): rough edges and missing capabilities measured in a full day of real use. |
 | 2026-09-02 | `4af5433` | §8, §9 | `xae list_projects` / `select_project`, per-call `tsProject`, `TE1000_DEFAULT_TSPROJECT`, ambiguity declared on reads and refused by the target-changing verbs; `list_configurations` / `set_configuration`, per-project `xae_build`, and the typed `PlatformName` read. |
 | 2026-09-03 | `89997d5` | §10 | `string[]` vInfo for the members of a POU, so 609 Method, 608 Action and 616 Transition can be created; `accessor` and `implSeed`; interface members 610 / 612 / 654 / 655; accessors may omit their name; the create guard resolves the tree before declaring a failure. |
+| 2026-09-08 | (this change) | §11 | TwinCAT HMI (TE2000): `hmi_project` / `hmi_symbol` / `hmi_function` / `hmi_publish`, the pkgdef-resolved automation ProgId, the HMI project walk and session cache, and the publish pre-flight that refuses a profile which would skip the server-extension configuration. |
 
 Upstream's own [CHANGELOG.md](CHANGELOG.md) is left untouched: it tracks their releases,
 and a fork writing into it would collide on every merge from `upstream`.
@@ -339,6 +493,10 @@ and what is deliberately out of scope — lives in [BACKLOG.md](BACKLOG.md). The
 - Add what our CI needs and this server does not have yet: running the TcUnit suite
   (without the runtime restart other servers do), `RunStaticAnalysis()` +
   `ExportToSarif()`, and documentation generation.
+- Finish the HMI side: internal symbols (they need the daemon to bind
+  `TcHmiAutomation.dll` early, see §11), `ITcHmiFile` control-level editing for placing
+  widgets and bindings without touching HTML as text, and an `hmi_publish publish` that
+  has actually been run end to end.
 - A guard for contention on a shared user-mode runtime. When an IDE, a CI runner and
   this server share one UmRT, activating or running tests from here can disturb a build
   someone else is in the middle of. That is not specific to us — anyone running a CI

@@ -8,7 +8,8 @@
 > **This is the AU-tomation fork of [`Edge-JB/TwinCAT-XAE-MCP`](https://github.com/Edge-JB/TwinCAT-XAE-MCP).**
 > What this fork changes, and why, is in **[FORK-NOTES.md](FORK-NOTES.md)** — including
 > support for TE1000 integrated in Visual Studio 2022, a severity filter that works on
-> TwinCAT projects, and an IDE shutdown that leaves no orphaned `devenv` behind.
+> TwinCAT projects, an IDE shutdown that leaves no orphaned `devenv` behind, and a family
+> of `hmi_*` verbs for TwinCAT HMI (TE2000) projects in the same solution.
 > The rest of this README is upstream's and still applies.
 
 > A [Model Context Protocol](https://modelcontextprotocol.io) server for **Beckhoff TwinCAT 3** engineering automation — drive the **TE1000 / XAE Automation Interface** from an AI agent or any MCP client.
@@ -358,6 +359,10 @@ Paths into the System Manager tree use `^` separators, e.g.
 | `tc_measurement` | Scope + Analytics (TIAN) | `scope_create`, `scope_record` 🔒, `analytics_create`, `logger_create`, `stream_create`, … |
 | `tc_license` | TwinCAT licensing | `list`, `add`, `activate_response` 🔒 |
 | `tc_variant` | Project variant management | `get_config`, `get_current`, `set_config`, `select`, `enable`, `disable` |
+| `hmi_project` | TwinCAT HMI (TE2000) projects *(fork)* | `list`, `info`, `add_view`, `add_usercontrol`, `add_content`, `add_theme`, `add_localization`, `config_get/set`, `build`, `save` |
+| `hmi_symbol` | HMI symbol mappings *(fork)* | `list`, `map`, `unmap` |
+| `hmi_function` | HMI Functions, all nine identity points *(fork)* | `list`, `create`, `rename` |
+| `hmi_publish` | Publish an HMI project *(fork)* | `profiles`, `publish` 🔒, `result` |
 
 ### Runtime (guarded)
 

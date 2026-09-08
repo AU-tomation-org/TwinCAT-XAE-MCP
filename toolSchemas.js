@@ -49,6 +49,7 @@ const CPP_PUBLISH_CONFIRMATION = "ALLOW_CPP_PUBLISH";
 const MEASUREMENT_RECORD_CONFIRMATION = "ALLOW_MEASUREMENT_RECORD";
 const LICENSE_ACTIVATE_CONFIRMATION = "ALLOW_LICENSE_ACTIVATE";
 const IDE_SHUTDOWN_CONFIRMATION = "ALLOW_XAE_SHUTDOWN";
+const HMI_PUBLISH_CONFIRMATION = "ALLOW_HMI_PUBLISH";
 
 const CONFIRMATIONS = {
   ACTIVATE_CONFIRMATION,
@@ -64,6 +65,7 @@ const CONFIRMATIONS = {
   MEASUREMENT_RECORD_CONFIRMATION,
   LICENSE_ACTIVATE_CONFIRMATION,
   IDE_SHUTDOWN_CONFIRMATION,
+  HMI_PUBLISH_CONFIRMATION,
 };
 
 // XAE single-tool action name -> daemon action name (used by the xae handler).
@@ -709,6 +711,109 @@ const toolSchemas = {
   twincat_restart_runtime: {
     description: `Start/restart the TwinCAT runtime on the target. Guarded: confirm="${RESTART_CONFIRMATION}".`,
     inputSchema: { confirm: z.string() },
+  },
+
+  hmi_project: {
+    description:
+      "TwinCAT HMI (TE2000) projects in the open solution. Reached from the SAME IDE as every other tool here (dte.GetObject on the TE2000 automation ProgId, resolved from the package's pkgdef, not hardcoded), so an HMI call and a PLC call share one COM session. " +
+      "WHICH project: HMI projects are .hmiproj nodes, a different kind from the .tsproj that tsProject names — they have their own parameter, hmiProject (name or path, from list). With exactly one in the solution it is used automatically; with several and none named, reads take the first and flag hmiProjectAmbiguous while WRITES refuse and list them. Actions: " +
+      "list (read-only) — the HMI projects with name, path and IsReady, plus the ProgId that answered and how it was resolved; " +
+      "info (read-only) — GetProjectInformation (name, directory, guid), IsReady, IsPublishRunning, all 8 ConfigFields, and the counts of views / content / userControls / userFunctions / dependencyFiles read from tchmiconfig.json; " +
+      "add_view | add_usercontrol | add_content (path) — project-RELATIVE path WITH the extension (e.g. UserControls\\Foo.usercontrol); an absolute path or the wrong extension is refused. Go through this rather than writing the file: ONE add writes several registrations (the .hmiproj <Content Include>, the tchmiconfig entry, and for a user control its definition in tchmi.project.Schema.json), and a hand-written file plus a hand-written .hmiproj entry gets one of them and silently loses the others. The response reports each registration read back from disk, and flags an incomplete one. A file the .hmiproj does not declare does NOT exist for build or publish, and nothing reports it; " +
+      "add_theme (name), add_localization (name, isoLanguage); " +
+      "config_get (field? — omit for all 8), config_set (field, value) — ActiveTheme, Locale, ScaleMode, StartupView, WebsocketIntervalTime, WebsocketTimeout, WebsocketSystemTimeout, LoginPage. Each goes through its own typed setter and the response carries a readback; ScaleMode takes a name (None | ScaleToFit | ScaleToFitWidth | ScaleToFitHeight | ScaleToFill) or 0-4; " +
+      "build (configuration?, clean?) — Build/Clean on the HMI project. READ THE VERDICT NARROWLY: green means the project packages, NOT that the bindings are wired — a misspelled binding attribute builds green with an empty Error List (measured). Same shape of false green as xae_build on a PLC library; " +
+      "save — SaveAllFiles. Writes default to save:true because the registrations reach disk only on save.",
+    inputSchema: {
+      action: z.enum([
+        "list", "info", "add_view", "add_usercontrol", "add_content", "add_theme",
+        "add_localization", "config_get", "config_set", "build", "save",
+      ]),
+      hmiProject: z.string().optional().describe("which HMI project: its name or its .hmiproj path, from action 'list'"),
+      path: z.string().optional().describe("add_view/add_usercontrol/add_content: project-relative path WITH extension"),
+      name: z.string().optional().describe("add_theme / add_localization"),
+      isoLanguage: z.string().optional().describe("add_localization, e.g. 'en' or 'de'"),
+      field: z.string().optional().describe("config_get/config_set: one of the 8 ConfigFields"),
+      value: z.any().optional().describe("config_set: string for the text fields, whole number for the websocket timings, name or 0-4 for ScaleMode"),
+      configuration: z.string().optional().describe("build: solution configuration name; default the active one"),
+      clean: z.boolean().optional().describe("build: run Clean instead of Build"),
+      updateUi: z.boolean().optional().describe("build/publish: let the IDE update its UI during the run (default false)"),
+      save: z.boolean().optional(),
+      mode: z.enum(["active", "activeOrCreate", "create"]).optional().describe("DTE attach mode; default active"),
+      timeoutMs: z.number().int().optional(),
+    },
+  },
+
+  hmi_symbol: {
+    description:
+      "Symbols of a TwinCAT HMI project, through the project's server interface. Mapped symbols are an EXPLICIT list (Server\\TcHmiSrv\\TcHmiSrv.Config.default.json), not a live discovery: a binding onto a symbol nobody mapped is null at run time and silent at build time, which is why listing them is worth a verb. Actions: " +
+      "list (read-only; refresh?, filter? substring on the mapped name, maxResults? default 500) — mapped name, domain, the tchmi schema $ref of its type, ReadOnly and Hidden; " +
+      "map (mapName, internalName, domain? default ADS, subSymbolName?) — MapSymbol; the 4-argument form with subSymbolName needs ITcHmiServer3 and fails clearly on an older server rather than dropping the sub-symbol; " +
+      "unmap (mapName, domain? default ADS, removeHistorizedData?). " +
+      "NOT here, and measured rather than assumed: creating an INTERNAL symbol. ITcHmiInternalSymbol does not marshal through IDispatch (all four call routes fail, the 5-argument overload included), unlike ITcHmiMappedSymbol which reads fine. Internal symbols need the IDE's symbol tool until this daemon binds TcHmiAutomation.dll early.",
+    inputSchema: {
+      action: z.enum(["list", "map", "unmap"]),
+      hmiProject: z.string().optional(),
+      mapName: z.string().optional(),
+      internalName: z.string().optional(),
+      subSymbolName: z.string().optional(),
+      domain: z.string().optional().describe("default ADS"),
+      removeHistorizedData: z.boolean().optional(),
+      refresh: z.boolean().optional(),
+      filter: z.string().optional(),
+      maxResults: z.number().int().optional(),
+      save: z.boolean().optional(),
+      mode: z.enum(["active", "activeOrCreate", "create"]).optional(),
+      timeoutMs: z.number().int().optional(),
+    },
+  },
+
+  hmi_function: {
+    description:
+      "TwinCAT HMI Functions. There is NO AddFunction in the automation API — views, user controls, themes, localizations and content have first-class verbs, Functions do not — and ChangeConfig cannot help either (ConfigFields holds 8 members, none of them the function lists). So a Function's identity lives in NINE places and the IDE's own rename aligns only part of them (and deletes module-scope variables declared outside the function body): the .ts and .function.json file names, `function <N>` and `registerFunctionEx('<N>', ...)` in the source, function.name / function.displayName / dependencyFiles[0].name in the descriptor, and dependencyFiles[].name + userFunctions[].url in tchmiconfig.json — plus two <Content Include> entries in the .hmiproj. This tool writes all of them by construction. Actions: " +
+      "list (read-only) — the functions on disk, and whether each is registered in tchmiconfig.json; " +
+      "create (name, returnType?, description?, arguments? [{name, type?, description?, required?, bindable?, displayName?}], namespace?, sourceText?, descriptorJson?) — writes Functions\\<name>.ts and Functions\\<name>.function.json, then declares the SOURCE in the collection of the Functions folder. Only the source: the project system then pulls the descriptor in itself (nesting it DependentUpon the .ts) and writes both tchmiconfig registrations, and adding the descriptor on top of that produces a second, '<name> - Copy.function.json' declaration. namespace and the descriptor's $schema default to what the project's existing functions use. dependencyFiles type is EsModule, which is what an ES-module .ts compiles to — a namespace-style .js needs JavaScript instead, and getting that wrong compiles clean and throws ReferenceError at run time; " +
+      "rename (name, newName) — renames the .ts THROUGH THE PROJECT and lets the descriptor follow. Order is load-bearing and its failure is silent: the descriptor is declared DependentUpon the source, the project system cascades a rename from parent to dependent, so renaming the descriptor first renames the source to '<new>.function.json.ts' and writes that stem into tchmiconfig. The response reports every rewrite count and whether any trace of the old name is left in the config. It renames the DEFINITION, not the call sites: bindings and events that call the function still name the old one.",
+    inputSchema: {
+      action: z.enum(["list", "create", "rename"]),
+      hmiProject: z.string().optional(),
+      name: z.string().optional(),
+      newName: z.string().optional(),
+      namespace: z.string().optional(),
+      returnType: z.string().optional().describe("a tchmi schema $ref, e.g. tchmi:general#/definitions/Boolean"),
+      description: z.string().optional(),
+      arguments: z.array(z.object({
+        name: z.string(),
+        type: z.string().optional(),
+        displayName: z.string().optional(),
+        description: z.string().optional(),
+        required: z.boolean().optional(),
+        bindable: z.boolean().optional(),
+      })).optional(),
+      sourceText: z.string().optional().describe("create: the whole .ts, instead of the generated skeleton"),
+      descriptorJson: z.string().optional().describe("create: the whole .function.json, instead of the generated one"),
+      save: z.boolean().optional(),
+      mode: z.enum(["active", "activeOrCreate", "create"]).optional(),
+      timeoutMs: z.number().int().optional(),
+    },
+  },
+
+  hmi_publish: {
+    description:
+      `Publish a TwinCAT HMI project to a TcHmi server. GUARDED: publish requires confirm="${HMI_PUBLISH_CONFIRMATION}" — one server instance hosts ONE project, so publishing REPLACES whatever that instance was serving. Actions: ` +
+      "profiles (read-only) — the publish profiles from Properties\\tchmipublish.config.json, each with its destination and whether it will actually push the server-extension configuration; " +
+      "publish (profile, confirm, updateUi?, force?) — pre-flight then Publish. The pre-flight is the point: with serverExtensions populated (which is what the IDE's publish dialog writes) a publish SUCCEEDS, uploads the project, and silently does NOT push the server extension configuration — the ADS runtimes block stays at the server default and every symbol is null. That is refused here unless force:true; the cure is \"serverExtensions\": [] in the profile. It has to be caught BEFORE the call because ITcHmiPublishResult carries only Result / IsCompleted / SubmissionId (measured by reflection) — there is no per-extension verdict, so a green publish means the upload ran, not that the configuration landed. Confirm on the server storage that the RUNTIMES::*::NETID rows are no older than PROJECTNAME; " +
+      "result (read-only) — IsPublishRunning plus the last GetPublishResult.",
+    inputSchema: {
+      action: z.enum(["profiles", "publish", "result"]),
+      hmiProject: z.string().optional(),
+      profile: z.string().optional(),
+      updateUi: z.boolean().optional(),
+      force: z.boolean().optional().describe("publish anyway when the profile would skip the server-extension config"),
+      confirm: z.string().optional(),
+      mode: z.enum(["active", "activeOrCreate", "create"]).optional(),
+      timeoutMs: z.number().int().optional(),
+    },
   },
 };
 

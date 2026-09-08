@@ -17,6 +17,16 @@ namespace Te1000Daemon
         private string _mode;
         private bool _stale;
 
+        // The TwinCAT HMI (TE2000) automation object of the SAME IDE, cached beside the
+        // sysmanager and under the same staleness rules. It is reached from this DTE
+        // (dte.GetObject(<ProgId>)), so it belongs to this COM session and this STA
+        // thread -- a second MCP server attaching to the same IDE for HMI work would
+        // reintroduce the orphaned-devenv and ROT-ambiguity problems this session exists
+        // to solve. _hmiProgIdHow records how the name was found, for the response.
+        private dynamic _hmi;
+        private string _hmiProgId;
+        private string _hmiProgIdHow;
+
         // Identity of the IDE currently attached, so a caller can be told which one it
         // got and so a request for a DIFFERENT one is not silently served the cached
         // instance. _currentPid is 0 when the identity could not be resolved -- in which
@@ -67,7 +77,7 @@ namespace Te1000Daemon
 
         public void MarkStale()
         {
-            _stale = true; _dte = null; _sysManager = null; _currentPid = 0; _currentMoniker = null; _ownedByUs = false;
+            _stale = true; _dte = null; _sysManager = null; _hmi = null; _currentPid = 0; _currentMoniker = null; _ownedByUs = false;
             // The cached sysmanager is gone with the DTE, so its identity goes too -- but
             // NOT the selection: it is a name, it outlives the RCW, and re-applying it is
             // exactly what makes a worker recycle invisible to the caller.
@@ -131,7 +141,7 @@ namespace Te1000Daemon
                 // the CLR hands out the SAME RCW for a given COM identity -- so releasing
                 // it here would tear down an object the very next ROT walk may return.
                 // Let the GC reclaim it instead.
-                _dte = null; _sysManager = null; _currentPid = 0; _currentMoniker = null;
+                _dte = null; _sysManager = null; _hmi = null; _currentPid = 0; _currentMoniker = null;
                 _ownedByUs = false;
             }
 
@@ -140,6 +150,7 @@ namespace Te1000Daemon
             _progId = progId;
             _mode = mode;
             _sysManager = null;
+            _hmi = null;
             _stale = false;
             _ownedByUs = created;
             ResolveCurrentIdentity(progId);
@@ -484,6 +495,50 @@ namespace Te1000Daemon
             return result;
         }
 
+        // The TwinCAT HMI automation object of the attached IDE, cached like the
+        // sysmanager. The ProgId is resolved once per IDE (see HmiInterop) rather than
+        // hardcoded, and the object is re-acquired whenever the cached one stops
+        // answering -- an IDE that closed its solution keeps answering, one that died
+        // does not.
+        public dynamic GetHmiAutomation()
+        {
+            if (_dte == null) throw new BridgeException("DTE not acquired");
+
+            if (_hmi != null && !_stale && IsHmiAlive(_hmi)) return _hmi;
+            _hmi = null;
+
+            string how;
+            string progId = HmiInterop.ResolveProgId(_dte, out how);
+
+            dynamic hmi = null;
+            try { hmi = _dte.GetObject(progId); }
+            catch (Exception ex)
+            {
+                throw new BridgeException(
+                    "The TwinCAT HMI automation object '" + progId + "' is registered but did not " +
+                    "hand out an instance: " + ComHelpers.ErrorCode(ex) +
+                    ". The TE2000 package may have failed to load in this IDE.");
+            }
+            if (hmi == null)
+                throw new BridgeException("The TwinCAT HMI automation object '" + progId + "' returned null.");
+
+            _hmi = hmi;
+            _hmiProgId = progId;
+            _hmiProgIdHow = how;
+            return _hmi;
+        }
+
+        public string HmiProgId { get { return _hmiProgId; } }
+        public string HmiProgIdHow { get { return _hmiProgIdHow; } }
+
+        // Cheap liveness probe. GetProcessId() is the one call that is both trivial and
+        // proves the object still belongs to a running IDE.
+        private static bool IsHmiAlive(dynamic hmi)
+        {
+            try { var _ = hmi.GetProcessId(); return true; }
+            catch { return false; }
+        }
+
         // Get-SysManager (L623-676): prefer the loaded .tsproj project Object
         // (stays bound to the live config), else DTE.GetObject('TcSysManager').
         // Cached; retries transient RPC busy.
@@ -714,6 +769,17 @@ namespace Te1000Daemon
         // not pay for what only list_projects displays.
         public List<ProjectInfo> ListProjects(bool detailed)
         {
+            return ListProjects(TsProjExtension, detailed);
+        }
+
+        public const string TsProjExtension = ".tsproj";
+        public const string HmiProjExtension = ".hmiproj";
+
+        // Same walk, for one kind of project node. HMI projects live in the same
+        // solution as the TwinCAT ones but are a different node kind, so they were
+        // invisible to every caller here: the walk kept only .tsproj.
+        public List<ProjectInfo> ListProjects(string extension, bool detailed)
+        {
             if (_dte == null) throw new BridgeException("DTE not acquired");
             var result = new List<ProjectInfo>();
             dynamic solution = _dte.Solution;
@@ -727,7 +793,7 @@ namespace Te1000Daemon
                 dynamic project = null;
                 try { project = solution.Projects.Item(i); }
                 catch { }
-                CollectProject(project, result, detailed);
+                CollectProject(project, result, extension, detailed);
             }
             return result;
         }
@@ -735,7 +801,7 @@ namespace Te1000Daemon
         // One solution entry. Solution FOLDERS are projects too, and the real projects
         // then hang off their ProjectItems as SubProject -- a solution that groups the
         // library and its test suite in a folder would otherwise look empty.
-        private void CollectProject(dynamic project, List<ProjectInfo> result, bool detailed)
+        private void CollectProject(dynamic project, List<ProjectInfo> result, string extension, bool detailed)
         {
             if (project == null) return;
 
@@ -744,15 +810,20 @@ namespace Te1000Daemon
             catch { }
 
             if (!string.IsNullOrWhiteSpace(fullName) &&
-                fullName.EndsWith(".tsproj", StringComparison.OrdinalIgnoreCase))
+                fullName.EndsWith(extension, StringComparison.OrdinalIgnoreCase))
             {
                 var info = new ProjectInfo();
                 info.FullName = fullName;
                 info.Name = ComHelpers.SafeStr(delegate { return project.Name; });
                 info.UniqueName = ComHelpers.SafeStr(delegate { return project.UniqueName; });
-                try { info.SysManager = project.Object; }
-                catch { info.SysManager = null; }
-                info.IsCurrent = PathUtil.SamePath(_projectPath, fullName);
+                info.Kind = extension.TrimStart('.');
+                info.DteProject = project;
+                bool isTsProj = string.Equals(extension, TsProjExtension, StringComparison.OrdinalIgnoreCase);
+                // project.Object is the ITcSysManager only for a .tsproj. On an HMI node
+                // it is something else entirely, and handing it to a sysmanager caller
+                // would fail far from here.
+                if (isTsProj) { try { info.SysManager = project.Object; } catch { info.SysManager = null; } }
+                info.IsCurrent = isTsProj && PathUtil.SamePath(_projectPath, fullName);
 
                 if (detailed && info.SysManager != null)
                 {
@@ -781,7 +852,7 @@ namespace Te1000Daemon
                 dynamic sub = null;
                 try { sub = items.Item(i).SubProject; }
                 catch { }
-                if (sub != null) CollectProject(sub, result, detailed);
+                if (sub != null) CollectProject(sub, result, extension, detailed);
             }
         }
 
@@ -814,6 +885,24 @@ namespace Te1000Daemon
             public int PlcProjectCount;
             public bool IsCurrent;
             public dynamic SysManager;
+            // "tsproj" | "hmiproj". DteProject is the EnvDTE.Project node itself, which
+            // is what ITcHmiAutomation.GetHmiProject takes -- and the only identity an
+            // HMI project has from outside, since ITcHmiProject carries no Name.
+            public string Kind;
+            public dynamic DteProject;
+        }
+
+        // The HMI (.hmiproj) projects of the open solution, in solution order.
+        public List<ProjectInfo> ListHmiProjects()
+        {
+            return ListProjects(HmiProjExtension, false);
+        }
+
+        // Resolve one HMI project by name or path, with the same matching rules the
+        // TwinCAT ones get (exact path, path suffix, solution name, file stem).
+        public ProjectInfo MatchHmiProject(List<ProjectInfo> projects, ProjectRequest target)
+        {
+            return MatchProject(projects, target);
         }
 
         private static bool IsSysManagerAlive(dynamic sm)
@@ -834,9 +923,11 @@ namespace Te1000Daemon
             // are torn down rather than leaked until GC. MarkStale() may already
             // have nulled these (recycle path) — SafeRelease(null) is a no-op.
             object sm = (object)_sysManager;
+            object hmi = (object)_hmi;
             object dte = (object)_dte;
-            _sysManager = null; _dte = null;
+            _sysManager = null; _hmi = null; _dte = null;
             SafeRelease(sm);
+            SafeRelease(hmi);
             // Only release the DTE if WE own it (created via 'create'); an 'active'
             // DTE is the live IDE shared across the ROT, and over-releasing its RCW
             // can disturb the running IDE. We acquired our own RCW ref though, so a

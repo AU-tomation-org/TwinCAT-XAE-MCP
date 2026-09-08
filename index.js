@@ -46,6 +46,7 @@ const {
   MEASUREMENT_RECORD_CONFIRMATION,
   LICENSE_ACTIVATE_CONFIRMATION,
   IDE_SHUTDOWN_CONFIRMATION,
+  HMI_PUBLISH_CONFIRMATION,
 } = require("./toolSchemas.js");
 
 // 64-bit TcXaeShell (DTE.17.0) implies a 64-bit Windows, so the live UIA helper
@@ -1050,6 +1051,118 @@ server.registerTool(
       throw new Error(`Blocked. Re-run with confirm="${RESTART_CONFIRMATION}" to restart TwinCAT.`);
     }
     return textResult(await bridgeCall("twincat_restart_runtime", { confirm }));
+  },
+);
+
+// ---- TwinCAT HMI (TE2000) -------------------------------------------------
+// A family of verbs inside THIS server rather than a second MCP server: the HMI
+// automation object comes off the same DTE, so it belongs to the same COM session
+// on the same STA thread. Two servers on one IDE would bring back the orphaned
+// devenv and the ROT ambiguity that the attach machinery exists to solve.
+
+// Every hmi_* action names its project the same way, so thread it in one place.
+function hmiBase(p) {
+  return { mode: p.mode, hmiProject: p.hmiProject, timeoutMs: p.timeoutMs };
+}
+
+server.registerTool(
+  "hmi_project",
+  toolSchemas.hmi_project,
+  async (p) => {
+    const base = hmiBase(p);
+    switch (p.action) {
+      case "list":
+        return textResult(await bridgeCall("hmi_list_projects", base));
+      case "info":
+        return textResult(await bridgeCall("hmi_project_info", base));
+      case "add_view":
+      case "add_usercontrol":
+      case "add_content": {
+        need(p, ["path"], p.action);
+        const kind = p.action.slice("add_".length);
+        return textResult(await bridgeCall("hmi_add_item", { ...base, kind, path: p.path, save: p.save }));
+      }
+      case "add_theme":
+        need(p, ["name"], p.action);
+        return textResult(await bridgeCall("hmi_add_item", { ...base, kind: "theme", name: p.name, save: p.save }));
+      case "add_localization":
+        need(p, ["name", "isoLanguage"], p.action);
+        return textResult(await bridgeCall("hmi_add_item", { ...base, kind: "localization", name: p.name, isoLanguage: p.isoLanguage, save: p.save }));
+      case "config_get":
+        return textResult(await bridgeCall("hmi_config_get", { ...base, field: p.field }));
+      case "config_set":
+        need(p, ["field"], p.action);
+        if (p.value === undefined) throw new Error("config_set needs a value.");
+        return textResult(await bridgeCall("hmi_config_set", { ...base, field: p.field, value: p.value, save: p.save }));
+      case "build":
+        return textResult(await bridgeCall("hmi_build", { ...base, configuration: p.configuration, clean: p.clean === true, updateUi: p.updateUi === true }));
+      case "save":
+        return textResult(await bridgeCall("hmi_project_save", base));
+    }
+  },
+);
+
+server.registerTool(
+  "hmi_symbol",
+  toolSchemas.hmi_symbol,
+  async (p) => {
+    const base = hmiBase(p);
+    switch (p.action) {
+      case "list":
+        return textResult(await bridgeCall("hmi_symbol_list", { ...base, refresh: p.refresh === true, filter: p.filter, maxResults: p.maxResults }));
+      case "map":
+        need(p, ["mapName", "internalName"], p.action);
+        return textResult(await bridgeCall("hmi_symbol_map", { ...base, mapName: p.mapName, internalName: p.internalName, subSymbolName: p.subSymbolName, domain: p.domain, save: p.save }));
+      case "unmap":
+        need(p, ["mapName"], p.action);
+        return textResult(await bridgeCall("hmi_symbol_unmap", { ...base, mapName: p.mapName, domain: p.domain, removeHistorizedData: p.removeHistorizedData === true, save: p.save }));
+    }
+  },
+);
+
+server.registerTool(
+  "hmi_function",
+  toolSchemas.hmi_function,
+  async (p) => {
+    const base = hmiBase(p);
+    switch (p.action) {
+      case "list":
+        return textResult(await bridgeCall("hmi_function_list", base));
+      case "create":
+        need(p, ["name"], p.action);
+        return textResult(await bridgeCall("hmi_function_create", {
+          ...base, name: p.name, namespace: p.namespace, returnType: p.returnType,
+          description: p.description, arguments: p.arguments,
+          sourceText: p.sourceText, descriptorJson: p.descriptorJson, save: p.save,
+        }));
+      case "rename":
+        need(p, ["name", "newName"], p.action);
+        return textResult(await bridgeCall("hmi_function_rename", { ...base, name: p.name, newName: p.newName, save: p.save }));
+    }
+  },
+);
+
+server.registerTool(
+  "hmi_publish",
+  toolSchemas.hmi_publish,
+  async (p) => {
+    const base = hmiBase(p);
+    switch (p.action) {
+      case "profiles":
+        return textResult(await bridgeCall("hmi_publish_profiles", base));
+      case "result":
+        return textResult(await bridgeCall("hmi_publish_result", base));
+      case "publish": {
+        need(p, ["profile"], p.action);
+        // One TcHmi server instance hosts ONE project, so a publish replaces whatever
+        // that instance was serving. That is an outward-facing, hard-to-undo change:
+        // it gets the same token treatment as activate/restart/download.
+        if (p.confirm !== HMI_PUBLISH_CONFIRMATION) {
+          throw new Error(`Blocked. publish uploads this project to a TcHmi server instance and REPLACES whatever it was serving. Re-run with confirm="${HMI_PUBLISH_CONFIRMATION}" to proceed.`);
+        }
+        return textResult(await bridgeCall("hmi_publish", { ...base, profile: p.profile, updateUi: p.updateUi === true, force: p.force === true }));
+      }
+    }
   },
 );
 

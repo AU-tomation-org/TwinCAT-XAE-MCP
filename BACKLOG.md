@@ -101,6 +101,57 @@ and a preventive sweep would put the whole authoring path at risk to gain consis
 nothing else. Worth aligning the day something else already touches those cases — with
 602, 603, 604 and 611 all re-tested, not assumed.
 
+### 7. Two identical builds of the daemon produce different bytes
+
+`Te1000Daemon.csproj` sets `<Deterministic>true</Deterministic>`, so an install has been
+checked by hashing a rebuild and comparing. That check does not hold: the in-box
+compiler MSBuild v4 drives (`Framework64\v4.0.30319`) ignores the property. Measured
+2026-09-08 -- same source, same configuration, same output directory, `obj` output
+deleted between passes:
+
+```
+pass 1 : 48BA551445B1CD6D9C86CDB9EEA48C58D670CEB9FEEA34D61C7D1C10E425B0ED
+pass 2 : 7186BA2965550796F774B752DD0F3B438A5F51274CFFCEDB56A593401E6F37EA
+```
+
+So a hash comparison between a probe build and a release build proves nothing, and a
+mismatch is not evidence of a source difference -- which is the worse half, because it
+sends you looking for a change that is not there.
+
+**Until then**: install by COPYING the binary that passed the tests into `bin\Release`,
+not by rebuilding it there. The copy makes the hashes equal by construction, and that is
+then a real check rather than a hopeful one. (Whether `-p:Deterministic=true` reaches a
+csc that honours it, or whether the build should move to a Roslyn compiler, is worth one
+experiment before this is written up as a fix.)
+
+---
+
+### 8. Finish the TwinCAT HMI side
+
+FORK-NOTES §11 landed `hmi_project`, `hmi_symbol`, `hmi_function` and `hmi_publish`.
+Three pieces are deliberately not in it, in the order they are worth doing:
+
+- **Bind `TcHmiAutomation.dll` early.** `ITcHmiInternalSymbol` does not marshal through
+  IDispatch (all four call routes fail; the measurement is in §11), so creating an
+  internal symbol is the one authoring job still left to the IDE. The assembly is
+  `[ComVisible(true)]` with a GUID per interface and ships in
+  `TE2000-HMI-Engineering\MSBuild\` and in its `bin\`, so this is the same shape of fix as the
+  reflection shim in `MeasurementActions` -- and it would also make the property reads on
+  the child interfaces typed rather than best-effort.
+- **`ITcHmiFile`: place controls instead of editing HTML as text.** Reflection shows a
+  richer surface than the notes assumed: `GetSource` / `SetSource`, `GetAllIdentifiers`,
+  `GetChildIdentifiers`, `GetControl`, `AddControl` / `AddControlBefore` /
+  `AddControlAfter`, `RemoveControl`, `Beautify`, and `ITcHmiControl.ChangeAttribute(s)`
+  plus per-group permissions. `ITcHmiAutomation.GetHmiFile(EnvDTE.ProjectItem)` is the way
+  in, which the existing solution walk already reaches. That answers the old open question
+  "how do you enumerate an existing project's views" -- it is not open any more, just
+  unbuilt.
+- **Run `hmi_publish publish` end to end once.** It is written and its pre-flight is
+  tested, but the publish itself has never been executed: doing so replaces whatever the
+  target `TcHmiSrv` instance was serving, and there was no instance free to take it. It
+  needs a throwaway server instance (they are cheap: `TcHmiSrv.exe --serviceAddInstance`,
+  no admin rights and no service restart) before the verb can be called proven.
+
 ---
 
 ## Missing capabilities, most valuable first

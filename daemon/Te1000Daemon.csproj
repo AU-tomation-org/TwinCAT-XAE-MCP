@@ -108,6 +108,7 @@
   <ItemGroup>
     <Compile Include="Program.cs" />
     <Compile Include="VsInterop.cs" />
+    <Compile Include="HmiInterop.cs" />
     <Compile Include="Json.cs" />
     <Compile Include="Log.cs" />
     <Compile Include="OleMessageFilter.cs" />
@@ -136,6 +137,7 @@
     <Compile Include="Actions\LicenseVariantActions.cs" />
     <Compile Include="Actions\NcActions.cs" />
     <Compile Include="Actions\SessionDownloadActions.cs" />
+    <Compile Include="Actions\HmiActions.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>
