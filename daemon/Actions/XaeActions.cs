@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace Te1000Daemon
 {
@@ -32,6 +34,357 @@ namespace Te1000Daemon
             h["xae_select_project"] = XaeSelectProject;
             h["xae_list_configurations"] = XaeListConfigurations;
             h["xae_set_configuration"] = XaeSetConfiguration;
+            h["xae_get_output"] = XaeGetOutput;
+            h["xae_find_project_template"] = XaeFindProjectTemplate;
+            h["xae_create_solution"] = XaeCreateSolution;
+            h["xae_add_project"] = XaeAddProject;
+        }
+
+        // ---- starting a new solution / project ------------------------------
+        //
+        // There was no way to start anything: plc_project create_from_template needs a
+        // .tsproj that already exists, and handing a .tsproj to open_solution fails with
+        // E_ABORT. So a new repo was made by copying an old one and rewriting names and
+        // GUIDs by hand.
+        //
+        // The empty solution and the project inside it are two different jobs. The
+        // solution is plain EnvDTE (Solution.Create + SaveAs). The project is
+        // Solution.AddFromTemplate -- and the whole difficulty is the template PATH,
+        // which differs between a TcXaeShell install and TE1000 integrated into VS2022,
+        // exactly like the PIA paths. It is not on disk as a .vstemplate under either
+        // install (searched, 2026-09-08), so it is not something to go looking for: ASK
+        // the IDE, through Solution.GetProjectTemplate(name, language). That answers
+        // correctly on whichever shell is actually running, which is the point.
+
+        // GetProjectTemplate lives on Solution2, not on Solution, and late-bound dynamic
+        // cannot see it: every call answers "'System.__ComObject' does not contain a
+        // definition for 'GetProjectTemplate'", which reads like a missing method rather
+        // than a missing interface. The RCW does QI to Solution2 -- it just has to be
+        // asked in typed form, the same shape of fix as the error list and the tree items.
+        // The hand-off out of `dynamic` has to be an ordinary assignment to `object`:
+        // casting a dynamic expression inline keeps the whole thing on the DLR, so the
+        // call is still looked up on __ComObject and fails with the same message about a
+        // missing definition -- which is what made this look like a missing method twice.
+        private static string GetProjectTemplate(dynamic dte, string name, string language)
+        {
+            object solObj = dte.Solution;
+            EnvDTE80.Solution2 sol2 = solObj as EnvDTE80.Solution2;
+            if (sol2 == null)
+                throw new BridgeException("The solution object does not QI to EnvDTE80.Solution2 " +
+                                          "(runtime type " + (solObj == null ? "null" : solObj.GetType().FullName) + ").");
+            return sol2.GetProjectTemplate(name, language);
+        }
+
+        // The (name, language) pairs GetProjectTemplate is tried with when the caller
+        // does not name one. Order matters only in that the first hit wins.
+        private static readonly string[][] TemplateCandidates = new string[][]
+        {
+            new string[] { "TwinCAT XAE Project.zip", "TwinCAT Projects" },
+            new string[] { "TwinCAT XAE Project", "TwinCAT Projects" },
+            new string[] { "TwinCAT Project.zip", "TwinCAT Projects" },
+            new string[] { "TwinCAT XAE Project (XML format).zip", "TwinCAT Projects" },
+            new string[] { "TcXaeProject.zip", "TwinCAT Projects" },
+            new string[] { "TwinCAT XAE Project.zip", "TwinCAT" },
+            new string[] { "TwinCAT Project.zip", "TwinCAT" },
+        };
+
+        // Where the XAE project template actually is. It is NOT a .vstemplate and not a
+        // zip: searched the whole VS extension tree, the template caches and both TwinCAT
+        // install roots on 2026-09-08 and there is exactly one candidate on the machine --
+        // a 67-byte stub .tsproj (<TcSmProject><Project/></TcSmProject>) next to an old
+        // style tsmprojects.vsdir, which is why Solution2.GetProjectTemplate answers
+        // "file not found" for every name one might guess. The project factory expands the
+        // stub when the project opens. TWINCAT3DIR is asked first because it is what the
+        // installer sets, so it follows a TwinCAT installed somewhere unusual.
+        private static readonly string[] XaeTemplateRelPaths = new string[]
+        {
+            @"Components\Base\PrjTemplate\TwinCAT Project.tsproj",
+        };
+
+        private static string FindXaeProjectTemplateOnDisk()
+        {
+            var roots = new List<string>();
+            string env = null;
+            try { env = Environment.GetEnvironmentVariable("TWINCAT3DIR"); }
+            catch { }
+            if (!string.IsNullOrWhiteSpace(env)) roots.Add(env);
+            roots.Add(@"C:\Program Files (x86)\Beckhoff\TwinCAT\3.1");
+            roots.Add(@"C:\TwinCAT\3.1");
+
+            foreach (string root in roots)
+            {
+                foreach (string rel in XaeTemplateRelPaths)
+                {
+                    try
+                    {
+                        string p = System.IO.Path.Combine(root.TrimEnd('\\', '/'), rel);
+                        if (System.IO.File.Exists(p)) return p;
+                    }
+                    catch { }
+                }
+            }
+            return null;
+        }
+
+        // Read-only: what can this machine actually start a TwinCAT project from? Reports
+        // both routes -- the template on disk and every (name, language) pair
+        // GetProjectTemplate was asked about -- so the answer is a measurement, and a
+        // caller on an install nobody here has seen can read the failures and pass its own
+        // templatePath or pair to add_project.
+        private static Json.JObj XaeFindProjectTemplate(ActionContext ctx)
+        {
+            dynamic dte = ctx.Dte(true);
+            Json.JArr given = ctx.Payload.Arr("candidates");
+
+            var tried = new Json.JArr();
+            string foundPath = null;
+            string foundName = null;
+            string foundLanguage = null;
+
+            var pairs = new List<string[]>();
+            if (given != null && given.Count > 0)
+            {
+                foreach (object o in given)
+                {
+                    Json.JObj c = o as Json.JObj;
+                    if (c == null) continue;
+                    pairs.Add(new string[] { c.Str("name"), c.Str("language") });
+                }
+            }
+            else
+            {
+                pairs.AddRange(TemplateCandidates);
+            }
+
+            foreach (string[] pair in pairs)
+            {
+                var row = new Json.JObj();
+                row["name"] = pair[0];
+                row["language"] = pair[1];
+                try
+                {
+                    string p = GetProjectTemplate(dte, pair[0], pair[1]);
+                    row["path"] = p;
+                    row["ok"] = !string.IsNullOrWhiteSpace(p);
+                    if (!string.IsNullOrWhiteSpace(p) && foundPath == null)
+                    {
+                        foundPath = p; foundName = pair[0]; foundLanguage = pair[1];
+                    }
+                }
+                catch (Exception ex)
+                {
+                    row["ok"] = false;
+                    row["error"] = ex.GetType().Name + ": " + ex.Message;
+                }
+                tried.Add(row);
+            }
+
+            string onDisk = FindXaeProjectTemplateOnDisk();
+
+            var data = new Json.JObj();
+            data["found"] = onDisk != null || foundPath != null;
+            data["diskTemplatePath"] = onDisk;
+            if (foundPath != null)
+            {
+                data["templatePath"] = foundPath;
+                data["templateName"] = foundName;
+                data["templateLanguage"] = foundLanguage;
+            }
+            else if (onDisk != null)
+            {
+                data["templatePath"] = onDisk;
+            }
+            data["getProjectTemplateTried"] = tried;
+            data["note"] = "The XAE project template is a stub .tsproj registered by an old-style " +
+                ".vsdir, not a .vstemplate, so GetProjectTemplate does not resolve it under any name; " +
+                "diskTemplatePath is the route that works.";
+            return data;
+        }
+
+        // Create a blank solution. Creating one CLOSES whatever is open, so an open
+        // solution is refused by name unless the caller says closeExisting -- the same
+        // contract as everywhere else here: never quietly do the destructive half.
+        private static Json.JObj XaeCreateSolution(ActionContext ctx)
+        {
+            dynamic dte = ctx.Dte(true);
+            string dir = ctx.Require("directory");
+            string name = ctx.Require("name");
+            bool closeExisting = ctx.Payload.Has("closeExisting") && ctx.Payload.Bool("closeExisting");
+
+            Json.JObj open = GetSolutionInfo(dte);
+            if (open.Bool("isOpen"))
+            {
+                if (!closeExisting)
+                    throw new BridgeException("'" + open.Str("fullName") + "' is open, and creating a " +
+                        "solution closes it. Re-run with closeExisting:true, or use another IDE instance " +
+                        "(xae list_instances / attach).");
+                try { dte.Solution.Close(true); }
+                catch (Exception ex) { throw new BridgeException("Closing the open solution failed: " + ex.Message); }
+            }
+
+            try { System.IO.Directory.CreateDirectory(dir); }
+            catch (Exception ex) { throw new BridgeException("Cannot create '" + dir + "': " + ex.Message); }
+
+            try { dte.Solution.Create(dir, name); }
+            catch (Exception ex) { throw new BridgeException("Solution.Create failed: " + ex.Message); }
+
+            // Create() builds the solution in memory; nothing is on disk until it is
+            // saved, and a solution that is not on disk cannot be reopened or committed.
+            string slnPath = System.IO.Path.Combine(dir, name + ".sln");
+            string saveError = null;
+            try { dte.Solution.SaveAs(slnPath); }
+            catch (Exception ex) { saveError = ex.Message; }
+
+            var data = new Json.JObj();
+            data["directory"] = dir;
+            data["name"] = name;
+            data["solutionPath"] = slnPath;
+            // Read it back from disk: Create + SaveAs returning is not proof of a file.
+            try { data["solutionFileWritten"] = System.IO.File.Exists(slnPath); }
+            catch { data["solutionFileWritten"] = null; }
+            if (saveError != null) data["saveError"] = saveError;
+            data["solution"] = GetSolutionInfo(dte);
+            ctx.Cache.Clear();
+            return data;
+        }
+
+        // Add a project from a template to the open solution. templatePath wins; failing
+        // that templateName/templateLanguage; failing that the probed candidates.
+        private static Json.JObj XaeAddProject(ActionContext ctx)
+        {
+            dynamic dte = ctx.Dte(true);
+            string name = ctx.Require("name");
+
+            Json.JObj open = GetSolutionInfo(dte);
+            if (!open.Bool("isOpen"))
+                throw new BridgeException("No solution is open. Create one first (xae create_solution) " +
+                                          "or open one (xae open_solution).");
+
+            string slnFile = open.Str("fullName");
+            string dir = ctx.Payload.Truthy("directory") ? ctx.Payload.Str("directory") : null;
+            if (string.IsNullOrWhiteSpace(dir))
+            {
+                string slnDir = null;
+                try { slnDir = System.IO.Path.GetDirectoryName(slnFile); }
+                catch { }
+                if (string.IsNullOrWhiteSpace(slnDir))
+                    throw new BridgeException("directory is required (the solution path could not be read).");
+                dir = System.IO.Path.Combine(slnDir, name);
+            }
+
+            string templatePath = ctx.Payload.Truthy("templatePath") ? ctx.Payload.Str("templatePath") : null;
+            var resolution = new Json.JObj();
+            if (!string.IsNullOrWhiteSpace(templatePath))
+            {
+                resolution["how"] = "templatePath";
+            }
+            else
+            {
+                string tName = ctx.Payload.Truthy("templateName") ? ctx.Payload.Str("templateName") : null;
+                string tLang = ctx.Payload.Truthy("templateLanguage") ? ctx.Payload.Str("templateLanguage") : "TwinCAT Projects";
+
+                // A named pair is what the caller asked for, so it is tried first and on its
+                // own. With nothing named, the stub .tsproj on disk is the route that works
+                // on a TwinCAT install (see FindXaeProjectTemplateOnDisk); the name probes
+                // are kept after it for a shell that does register a real template.
+                var tried = new Json.JArr();
+                if (!string.IsNullOrWhiteSpace(tName))
+                {
+                    var row = new Json.JObj();
+                    row["name"] = tName;
+                    row["language"] = tLang;
+                    try
+                    {
+                        string p = GetProjectTemplate(dte, tName, tLang);
+                        row["ok"] = !string.IsNullOrWhiteSpace(p);
+                        row["path"] = p;
+                        if (!string.IsNullOrWhiteSpace(p)) templatePath = p;
+                    }
+                    catch (Exception ex) { row["ok"] = false; row["error"] = ex.GetType().Name + ": " + ex.Message; }
+                    tried.Add(row);
+                    resolution["how"] = "GetProjectTemplate";
+                }
+                else
+                {
+                    templatePath = FindXaeProjectTemplateOnDisk();
+                    if (!string.IsNullOrWhiteSpace(templatePath)) resolution["how"] = "diskTemplate";
+                    else
+                    {
+                        foreach (string[] pair in TemplateCandidates)
+                        {
+                            var row = new Json.JObj();
+                            row["name"] = pair[0];
+                            row["language"] = pair[1];
+                            try
+                            {
+                                string p = GetProjectTemplate(dte, pair[0], pair[1]);
+                                row["ok"] = !string.IsNullOrWhiteSpace(p);
+                                row["path"] = p;
+                                if (!string.IsNullOrWhiteSpace(p)) { templatePath = p; tried.Add(row); break; }
+                            }
+                            catch (Exception ex) { row["ok"] = false; row["error"] = ex.GetType().Name + ": " + ex.Message; }
+                            tried.Add(row);
+                        }
+                        resolution["how"] = "GetProjectTemplate";
+                    }
+                }
+                if (tried.Count > 0) resolution["tried"] = tried;
+                if (string.IsNullOrWhiteSpace(templatePath))
+                    throw new BridgeException("No project template resolved. Run xae find_project_template " +
+                        "to see what this machine offers, then pass templatePath (or " +
+                        "templateName/templateLanguage). Tried: " + Json.Write(tried));
+            }
+            resolution["templatePath"] = templatePath;
+
+            try { dte.Solution.AddFromTemplate(templatePath, dir, name, false); }
+            catch (Exception ex)
+            {
+                throw new BridgeException("AddFromTemplate('" + templatePath + "', '" + dir + "', '" +
+                                          name + "') failed: " + ex.Message);
+            }
+
+            var data = new Json.JObj();
+            data["name"] = name;
+            data["directory"] = dir;
+            data["template"] = resolution;
+            data["projects"] = ListSolutionProjectNames(dte);
+            // The point of the verb is a .tsproj on disk; say whether one arrived rather
+            // than reporting the call that was made.
+            string tsproj = FindFileByExtension(dir, "*.tsproj");
+            data["tsProjectPath"] = tsproj;
+            data["tsProjectWritten"] = tsproj != null;
+            ctx.Cache.Clear();
+            return data;
+        }
+
+        private static Json.JArr ListSolutionProjectNames(dynamic dte)
+        {
+            var arr = new Json.JArr();
+            try
+            {
+                dynamic projects = dte.Solution.Projects;
+                int n = ComHelpers.ToInt(projects.Count);
+                for (int i = 1; i <= n; i++)
+                {
+                    dynamic p;
+                    try { p = projects.Item(i); }
+                    catch { continue; }
+                    arr.Add(ComHelpers.SafeStr(delegate { return p.FullName; }));
+                }
+            }
+            catch { }
+            return arr;
+        }
+
+        private static string FindFileByExtension(string dir, string pattern)
+        {
+            try
+            {
+                if (!System.IO.Directory.Exists(dir)) return null;
+                string[] hits = System.IO.Directory.GetFiles(dir, pattern, System.IO.SearchOption.AllDirectories);
+                return hits.Length > 0 ? hits[0] : null;
+            }
+            catch { return null; }
         }
 
         // ---- shared helpers (port of bridge helper functions) ----------------
@@ -92,7 +445,7 @@ namespace Te1000Daemon
         }
 
         // Wait-ForBuildFinish (bridge L678-693): poll until BuildState != 2.
-        private static Json.JObj WaitForBuildFinish(dynamic solutionBuild, int timeoutMs)
+        internal static Json.JObj WaitForBuildFinish(dynamic solutionBuild, int timeoutMs)
         {
             DateTime deadline = DateTime.Now.AddMilliseconds(timeoutMs);
             while (DateTime.Now < deadline)
@@ -695,7 +1048,7 @@ namespace Te1000Daemon
             finally { if (pUnk != IntPtr.Zero) Marshal.Release(pUnk); }
         }
 
-        private static string ActiveConfigurationName(dynamic solutionBuild)
+        internal static string ActiveConfigurationName(dynamic solutionBuild)
         {
             try
             {
@@ -797,16 +1150,299 @@ namespace Te1000Daemon
             return data;
         }
 
+        // vsWindowKindOutput. The Output window is reached by its kind GUID when
+        // dte.ToolWindows.OutputWindow is not available.
+        private const string VsWindowKindOutput = "{34E76E81-EE4A-11D0-AE2E-00A0C90FFFC3}";
+
+        private static dynamic GetOutputWindowPanes(dynamic dte)
+        {
+            string firstError = null;
+            try
+            {
+                dynamic ow = dte.ToolWindows.OutputWindow;
+                if (ow != null) return ow.OutputWindowPanes;
+            }
+            catch (Exception ex) { firstError = ex.Message; }
+
+            // An IDE that has never shown the Output window can fail the ToolWindows
+            // route; the window itself still exists and answers through its kind GUID.
+            try
+            {
+                dynamic win = dte.Windows.Item(VsWindowKindOutput);
+                dynamic ow = win.Object;
+                if (ow != null) return ow.OutputWindowPanes;
+            }
+            catch (Exception ex)
+            {
+                throw new BridgeException("Output window unreachable: " +
+                    (firstError == null ? "" : firstError + " / ") + ex.Message);
+            }
+            throw new BridgeException("Output window unreachable" +
+                (firstError == null ? "." : ": " + firstError));
+        }
+
+        // xae_get_output -- the text of an Output window pane, newest lines last.
+        //
+        // The cure for the build that fails without saying why: a solution build that
+        // breaks inside one PLC project can leave a SINGLE Error List row -- "'TwinCAT
+        // XAE': Project 'X' build for platform 'Y' failed." -- with no file, no code and
+        // no compiler row. The reason is in the Output window, which nothing here could
+        // read, so the only way to a diagnosis was opening that project's own solution
+        // and building it there by hand.
+        //
+        // The pane list is always returned, and a pane that is not there is an error
+        // that names the ones that ARE -- the attach / select_project contract one level
+        // down, never a silent fallback onto some other pane. Matching is exact first,
+        // then case-insensitive substring, because pane names are localized.
+        private static Json.JObj XaeGetOutput(ActionContext ctx)
+        {
+            dynamic dte = ctx.Dte(true);
+            string wanted = ctx.Payload.Truthy("pane") ? ctx.Payload.Str("pane") : "Build";
+            int tail = ctx.Payload.Has("tail") ? ctx.Payload.Int("tail", 200) : 200;
+            if (tail <= 0) tail = 200;
+            if (tail > 20000) tail = 20000;
+
+            dynamic panes = GetOutputWindowPanes(dte);
+
+            int count;
+            try { count = ComHelpers.ToInt(panes.Count); }
+            catch (Exception ex) { throw new BridgeException("OutputWindowPanes.Count failed: " + ex.Message); }
+
+            var names = new Json.JArr();
+            var exact = new List<dynamic>();
+            var exactNames = new List<string>();
+            var partial = new List<dynamic>();
+            var partialNames = new List<string>();
+
+            for (int i = 1; i <= count; i++)
+            {
+                dynamic p;
+                try { p = panes.Item(i); }
+                catch { continue; }
+
+                string n = null;
+                try { n = (string)p.Name; }
+                catch { }
+                names.Add(n);
+                if (string.IsNullOrEmpty(n)) continue;
+
+                if (string.Equals(n, wanted, StringComparison.OrdinalIgnoreCase))
+                {
+                    exact.Add(p); exactNames.Add(n);
+                }
+                else if (n.IndexOf(wanted, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    partial.Add(p); partialNames.Add(n);
+                }
+            }
+
+            List<dynamic> hits = exact.Count > 0 ? exact : partial;
+            List<string> hitNames = exact.Count > 0 ? exactNames : partialNames;
+
+            if (hits.Count == 0)
+                throw new BridgeException("No Output pane matches '" + wanted + "'. Panes: " +
+                                          string.Join(", ", NamesOf(names)) + ".");
+            if (hits.Count > 1)
+                throw new BridgeException("'" + wanted + "' matches several Output panes: " +
+                                          string.Join(", ", hitNames.ToArray()) +
+                                          ". Name one of them exactly.");
+
+            dynamic pane = hits[0];
+            string paneName = hitNames[0];
+
+            string text;
+            try
+            {
+                dynamic doc = pane.TextDocument;
+                dynamic ep = doc.StartPoint.CreateEditPoint();
+                text = (string)ep.GetText(doc.EndPoint);
+            }
+            catch (Exception ex)
+            {
+                // Not every pane backs its content with a TextDocument -- the Source Control
+                // panes answer E_FAIL. That is a property of the pane, not a fault of the
+                // call, so say which pane and that another one may well work.
+                throw new BridgeException("Pane '" + paneName + "' has no readable text (" +
+                    ex.Message + "). Not every Output pane exposes a TextDocument; try another. Panes: " +
+                    string.Join(", ", NamesOf(names)) + ".");
+            }
+            if (text == null) text = "";
+
+            string[] all = text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+            // The pane text ends with a newline, so the split leaves empty tail entries.
+            int total = all.Length;
+            while (total > 0 && string.IsNullOrEmpty(all[total - 1])) total--;
+            int start = total > tail ? total - tail : 0;
+
+            var lines = new Json.JArr();
+            for (int i = start; i < total; i++) lines.Add(all[i]);
+
+            var data = new Json.JObj();
+            data["pane"] = paneName;
+            data["panes"] = names;
+            data["lineCount"] = total;
+            data["returned"] = lines.Count;
+            data["truncated"] = start > 0;
+            data["lines"] = lines;
+            return data;
+        }
+
+        private static string[] NamesOf(Json.JArr names)
+        {
+            var list = new List<string>();
+            foreach (object o in names)
+            {
+                string s = o as string;
+                list.Add(string.IsNullOrEmpty(s) ? "(unnamed)" : s);
+            }
+            return list.ToArray();
+        }
+
         // xae_save_all (L5306-5317): Save-Solution (File.SaveAll) then SolutionInfo.
         private static Json.JObj XaeSaveAll(ActionContext ctx)
         {
             dynamic dte = ctx.Dte(true);
-            dte.ExecuteCommand("File.SaveAll");
+            int budget = ctx.Payload.Has("timeoutMs") ? ctx.Payload.Int("timeoutMs", SaveSettleMs) : SaveSettleMs;
 
-            var data = new Json.JObj();
-            data["saved"] = true;
+            var data = SaveAllAndSettle(dte, budget);
             data["solution"] = GetSolutionInfo(dte);
             return data;
+        }
+
+        // How long a save is given to settle before it is reported unsettled.
+        internal const int SaveSettleMs = 15000;
+
+        // File.SaveAll is a shell COMMAND, not a method call: ExecuteCommand QUEUES it and
+        // returns before the save has landed. That is the whole of the "save:true does not
+        // put the .plcproj on disk" defect -- a create with save:true followed straight away
+        // by open_solution discardChanges:true discarded a project registration that had not
+        // been written yet, and the type then failed to resolve everywhere with "Unknown
+        // type: 'X'", a symptom that reads like a broken library reference rather than a lost
+        // <Compile Include>. The same sequence with a SEPARATE xae save_all call worked for
+        // one reason only: two pipe round trips let time pass.
+        //
+        // So: issue the command, then WAIT for the IDE to report itself clean, and say what
+        // was observed. A save still dirty at the end of its budget is reported as unsettled
+        // rather than claimed as done -- the caller can act on that instead of discovering it
+        // three calls later. Projects that stay dirty are asked to save themselves directly,
+        // since Project.Save() is a call and not a queued command.
+        internal static Json.JObj SaveAllAndSettle(dynamic dte, int timeoutMs)
+        {
+            if (timeoutMs <= 0) timeoutMs = SaveSettleMs;
+            if (timeoutMs > 120000) timeoutMs = 120000;
+
+            var data = new Json.JObj();
+            try { dte.ExecuteCommand("File.SaveAll"); }
+            catch (Exception ex)
+            {
+                data["saved"] = false;
+                data["saveError"] = ex.GetType().Name + ": " + ex.Message;
+                return data;
+            }
+
+            var sw = Stopwatch.StartNew();
+            Json.JArr dirty = UnsavedItems(dte);
+            bool nudged = false;
+            while (dirty.Count > 0 && sw.ElapsedMilliseconds < timeoutMs)
+            {
+                // Halfway through the budget, stop waiting on the queued command and ask the
+                // dirty projects directly. Project.Save() is a call, so it has finished when
+                // it returns; the command may still be behind other work in the shell queue.
+                if (!nudged && sw.ElapsedMilliseconds > timeoutMs / 2)
+                {
+                    nudged = true;
+                    SaveDirtyProjects(dte);
+                }
+                Thread.Sleep(100);
+                dirty = UnsavedItems(dte);
+            }
+            sw.Stop();
+
+            bool settled = dirty.Count == 0;
+            data["saved"] = settled;
+            data["settled"] = settled;
+            data["waitedMs"] = (int)sw.ElapsedMilliseconds;
+            if (nudged) data["savedProjectsDirectly"] = true;
+            if (!settled)
+            {
+                data["stillDirty"] = dirty;
+                data["warning"] = "File.SaveAll was issued but the IDE still reports unsaved items after " +
+                    ((int)sw.ElapsedMilliseconds) + " ms. Do NOT reopen the solution with discardChanges " +
+                    "until this settles: what is still dirty would be thrown away.";
+            }
+            return data;
+        }
+
+        // Everything the IDE still considers unsaved: open documents, the solution file, and
+        // the projects. Anything whose Saved cannot be read is skipped rather than guessed at
+        // -- a property that fails to answer is not evidence of a dirty file.
+        private static Json.JArr UnsavedItems(dynamic dte)
+        {
+            var dirty = new Json.JArr();
+
+            try
+            {
+                dynamic docs = dte.Documents;
+                int n = ComHelpers.ToInt(docs.Count);
+                for (int i = 1; i <= n; i++)
+                {
+                    dynamic d;
+                    try { d = docs.Item(i); }
+                    catch { continue; }
+                    bool saved;
+                    try { saved = (bool)d.Saved; }
+                    catch { continue; }
+                    if (!saved) dirty.Add(ComHelpers.SafeStr(delegate { return d.FullName; }));
+                }
+            }
+            catch { }
+
+            try
+            {
+                dynamic sol = dte.Solution;
+                bool solSaved;
+                try { solSaved = (bool)sol.Saved; }
+                catch { solSaved = true; }
+                if (!solSaved) dirty.Add(ComHelpers.SafeStr(delegate { return sol.FullName; }));
+
+                dynamic projects = sol.Projects;
+                int pn = ComHelpers.ToInt(projects.Count);
+                for (int i = 1; i <= pn; i++)
+                {
+                    dynamic p;
+                    try { p = projects.Item(i); }
+                    catch { continue; }
+                    bool saved;
+                    try { saved = (bool)p.Saved; }
+                    catch { continue; }
+                    if (!saved) dirty.Add(ComHelpers.SafeStr(delegate { return p.FullName; }));
+                }
+            }
+            catch { }
+
+            return dirty;
+        }
+
+        private static void SaveDirtyProjects(dynamic dte)
+        {
+            try
+            {
+                dynamic projects = dte.Solution.Projects;
+                int pn = ComHelpers.ToInt(projects.Count);
+                for (int i = 1; i <= pn; i++)
+                {
+                    dynamic p;
+                    try { p = projects.Item(i); }
+                    catch { continue; }
+                    bool saved;
+                    try { saved = (bool)p.Saved; }
+                    catch { continue; }
+                    if (saved) continue;
+                    try { p.Save(""); }
+                    catch (Exception ex) { Log.Error("SaveAllAndSettle: Project.Save failed", ex); }
+                }
+            }
+            catch (Exception ex) { Log.Error("SaveAllAndSettle: enumerating projects failed", ex); }
         }
 
         // xae_solution_build (L5436-5502).

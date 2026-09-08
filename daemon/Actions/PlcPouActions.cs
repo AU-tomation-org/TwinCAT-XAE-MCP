@@ -97,6 +97,7 @@ namespace Te1000Daemon
             var data = new Json.JObj();
             data["parentPath"] = parent;
             data["child"] = ComHelpers.ConvertTreeItem(child);
+            SaveIfRequested(ctx);
             return data;
         }
 
@@ -157,6 +158,7 @@ namespace Te1000Daemon
             var data = new Json.JObj();
             data["parentPath"] = parent;
             data["child"] = ComHelpers.ConvertTreeItem(child);
+            SaveIfRequested(ctx);
             return data;
         }
 
@@ -755,6 +757,7 @@ namespace Te1000Daemon
             var data = new Json.JObj();
             data["path"] = path;
             data["set"] = true;
+            SaveIfRequested(ctx);
             return data;
         }
 
@@ -822,6 +825,7 @@ namespace Te1000Daemon
             data["path"] = path;
             data["set"] = true;
             data["via"] = via;
+            SaveIfRequested(ctx);
             return data;
         }
 
@@ -896,6 +900,7 @@ namespace Te1000Daemon
             var data = new Json.JObj();
             data["path"] = path;
             data["set"] = true;
+            SaveIfRequested(ctx);
             return data;
         }
 
@@ -1205,6 +1210,7 @@ namespace Te1000Daemon
             data["name"] = childName;
             data["deleted"] = true;
             data["type"] = cType;
+            SaveIfRequested(ctx);
             return data;
         }
 
@@ -1227,6 +1233,7 @@ namespace Te1000Daemon
             data["path"] = path;
             data["newName"] = newName;
             data["newPath"] = newPath;
+            SaveIfRequested(ctx);
             return data;
         }
 
@@ -1269,6 +1276,7 @@ namespace Te1000Daemon
             data["newPath"] = newPath;
             data["name"] = splitInfo.Name;
             data["via"] = "export-delete-import";
+            SaveIfRequested(ctx);
             return data;
         }
 
@@ -1308,11 +1316,16 @@ namespace Te1000Daemon
             return failures;
         }
 
+        // save:true used to be a bare ExecuteCommand("File.SaveAll") -- a QUEUED shell
+        // command that returns before the save has landed, which is how a create with
+        // save:true could be followed by an open_solution discardChanges:true that threw
+        // the .plcproj registration away. Now it waits for the IDE to report itself clean
+        // and the report reaches the caller (Dispatcher.AnnotateSave).
         private static void SaveIfRequested(ActionContext ctx)
         {
             if (ctx.Payload.Has("save") && ctx.Payload.Bool("save"))
             {
-                ctx.Dte().ExecuteCommand("File.SaveAll");
+                ctx.SaveReport = XaeActions.SaveAllAndSettle(ctx.Dte(), XaeActions.SaveSettleMs);
             }
         }
 

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 
 namespace Te1000Daemon
 {
@@ -46,7 +47,7 @@ namespace Te1000Daemon
 
             if (ctx.Payload.Has("save") && ctx.Payload.Bool("save"))
             {
-                ctx.Dte().ExecuteCommand("File.SaveAll");
+                ctx.SaveReport = XaeActions.SaveAllAndSettle(ctx.Dte(), XaeActions.SaveSettleMs);
             }
             ctx.Cache.Invalidate("TIPC");
 
@@ -79,7 +80,7 @@ namespace Te1000Daemon
 
             if (ctx.Payload.Has("save") && ctx.Payload.Bool("save"))
             {
-                ctx.Dte().ExecuteCommand("File.SaveAll");
+                ctx.SaveReport = XaeActions.SaveAllAndSettle(ctx.Dte(), XaeActions.SaveSettleMs);
             }
             ctx.Cache.Invalidate("TIPC");
 
@@ -274,7 +275,7 @@ namespace Te1000Daemon
 
             if (ctx.Payload.Has("save") && ctx.Payload.Bool("save"))
             {
-                ctx.Dte().ExecuteCommand("File.SaveAll");
+                ctx.SaveReport = XaeActions.SaveAllAndSettle(ctx.Dte(), XaeActions.SaveSettleMs);
             }
             ctx.Cache.Invalidate(treePath);
 
@@ -294,10 +295,32 @@ namespace Te1000Daemon
             if (string.IsNullOrWhiteSpace(file)) throw new BridgeException("file is required");
             bool install = false;
             if (ctx.Payload.Has("install")) install = ctx.Payload.Bool("install");
+            bool overwrite = ctx.Payload.Has("overwrite") && ctx.Payload.Bool("overwrite");
 
             dynamic sm = ctx.SysManager();
             string treePath = ResolveIecProjectPath(ctx, sm, ctx.Payload.Str("treePath"));
             dynamic item = ComHelpers.GetTreeItem(sm, treePath);
+
+            // SaveAsLibrary never overwrites: onto an existing target it fails with
+            // "File '...' already exist. Cannot SaveAsLibrary!". install_library already
+            // takes an overwrite flag, so this is the same contract -- and refusing here,
+            // by name, beats letting the callee's message arrive wrapped in a claim about
+            // interfaces (see the catch below).
+            bool replaced = false;
+            bool targetExisted = false;
+            try { targetExisted = File.Exists(file); }
+            catch { }
+            if (targetExisted)
+            {
+                if (!overwrite)
+                    throw new BridgeException("'" + file + "' already exists, and SaveAsLibrary does not " +
+                        "overwrite. Re-run with overwrite:true to replace it, or export to another file.");
+                try { File.Delete(file); replaced = true; }
+                catch (Exception ex)
+                {
+                    throw new BridgeException("Cannot replace '" + file + "': " + ex.Message);
+                }
+            }
 
             try
             {
@@ -305,14 +328,30 @@ namespace Te1000Daemon
             }
             catch (Exception ex)
             {
-                throw new BridgeException("node '" + treePath +
-                    "' does not implement ITcPlcIECProject (use the nested project instance node): " + ex.Message);
+                // Report the failure that actually happened. This catch used to claim the
+                // node did not implement ITcPlcIECProject WHATEVER went wrong, so the real
+                // reason arrived as the tail of a sentence that contradicted it -- the
+                // candidate-node walk's last failure dressed up as the diagnosis. Ask the
+                // node whether it implements the interface, and only say so when it does not.
+                bool isIec = false;
+                try { isIec = PlcProjectHelper.IsIecProject((object)item); }
+                catch { }
+                if (!isIec)
+                    throw new BridgeException("node '" + treePath +
+                        "' does not implement ITcPlcIECProject (use the nested project instance node, " +
+                        "TIPC^<name>^<name> Project): " + ex.Message);
+                throw new BridgeException("SaveAsLibrary failed on '" + treePath + "': " + ex.Message);
             }
 
             var data = new Json.JObj();
             data["treePath"] = treePath;
             data["file"] = file;
             data["installed"] = install;
+            data["replacedExisting"] = replaced;
+            // Read the target back: SaveAsLibrary returning without throwing is not by
+            // itself proof that a file arrived where the caller asked for it.
+            try { data["fileWritten"] = File.Exists(file); }
+            catch { data["fileWritten"] = null; }
             return data;
         }
 

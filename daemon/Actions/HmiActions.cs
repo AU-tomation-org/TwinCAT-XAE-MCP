@@ -49,12 +49,31 @@ namespace Te1000Daemon
             h["hmi_function_list"] = FunctionListAction;
             h["hmi_function_create"] = FunctionCreateAction;
             h["hmi_function_rename"] = FunctionRenameAction;
+            h["hmi_file_identifiers"] = FileIdentifiersAction;
+            h["hmi_file_source"] = FileSourceAction;
+            h["hmi_file_set_source"] = FileSetSourceAction;
+            h["hmi_file_control"] = FileControlAction;
+            h["hmi_file_add_control"] = FileAddControlAction;
+            h["hmi_file_change_attributes"] = FileChangeAttributesAction;
+            h["hmi_file_remove_control"] = FileRemoveControlAction;
+            h["hmi_file_beautify"] = FileBeautifyAction;
             h["hmi_publish_profiles"] = PublishProfilesAction;
             h["hmi_publish"] = PublishAction;
             h["hmi_publish_result"] = PublishResultAction;
         }
 
         public const string PublishConfirmation = "ALLOW_HMI_PUBLISH";
+
+        // How long a publish is waited on before its result is reported as partial. The
+        // upload of a real project (2131 files) takes seconds, not minutes, but a slow
+        // target and a cold server extension start-up are both in the budget.
+        private const int PublishWaitMs = 600000;
+
+        private static bool IsPublishRunning(HmiTarget t)
+        {
+            object v = ComHelpers.Safe<object>(delegate { return t.Project.IsPublishRunning(); });
+            return v is bool && (bool)v;
+        }
 
         // ================= target resolution =================================
 
@@ -732,11 +751,43 @@ namespace Te1000Daemon
             bool persist = ctx.Payload.Has("persist") && ctx.Payload.Bool("persist");
             bool readOnly = ctx.Payload.Has("readOnly") && ctx.Payload.Bool("readOnly");
 
+            // The typed route first: ITcHmiInternalSymbol does not marshal through
+            // IDispatch (all four late-bound routes fail -- see below, and HmiTyped for
+            // the measurement), so it is asked for by interface. The late-bound attempts
+            // are kept underneath rather than deleted: they cost nothing when the typed
+            // cast works, and if a future TE2000 changes the assembly identity under us
+            // this verb degrades instead of disappearing.
+            object typedSym = null;
+            string typedError = null;
+            try
+            {
+                typedSym = HmiTyped.NewInternalSymbol((object)t.Project, name, value, type, persist, readOnly);
+            }
+            catch (Exception ex) { typedError = ex.GetType().Name + ": " + ex.Message; }
+
+            if (typedSym != null)
+            {
+                HmiTyped.AddInternalSymbol((object)t.Project, (TcHmiAutomation.ITcHmiInternalSymbol)typedSym);
+
+                var typed = new Json.JObj();
+                typed["name"] = name;
+                typed["type"] = type;
+                typed["persist"] = persist;
+                typed["readOnly"] = readOnly;
+                typed["instanceVia"] = "TcHmiAutomation.ITcHmiProject (early bound)";
+                // The project is the authority, not the call that returned: read it back.
+                Json.JObj typedBack = HmiTyped.ReadInternalSymbol((object)t.Project, name);
+                typed["confirmed"] = typedBack.Bool("found");
+                typed["readBack"] = typedBack;
+                SaveIfRequested(ctx, t, typed, true);
+                return Stamp(t, typed);
+            }
+
             // GetInternalSymbolInstance is overloaded (0-arg and 5-arg). Only one of the
             // two keeps the plain name through IDispatch, and which one is not knowable
             // from the metadata -- measured here, the 5-arg form fails outright. So: try
             // the convenient form, then its mangled sibling, then build the instance from
-            // the empty one and set its properties, which always works.
+            // the empty one and set its properties.
             dynamic sym = null;
             string how = null;
             try { sym = t.Project.GetInternalSymbolInstance(name, value, type, persist, readOnly); how = "GetInternalSymbolInstance(5)"; }
@@ -769,14 +820,15 @@ namespace Te1000Daemon
             }
             if (sym == null)
                 throw new BridgeException(
-                    "Creating an internal symbol is not reachable through late binding on this build. " +
-                    "Measured 2026-09-08, all four routes fail: GetInternalSymbolInstance() gives " +
-                    "'Specified cast is not valid', GetInternalSymbolInstance_2() gives 'Missing parameter " +
-                    "does not have a default value' (so _2 is the 5-argument overload), and the 5-argument " +
-                    "call on either name fails the cast -- ITcHmiInternalSymbol does not marshal through " +
-                    "IDispatch, the way ITcHmiMappedSymbol does. Reading and MAPPING symbols works " +
-                    "(hmi_symbol list / map / unmap); creating an INTERNAL one needs the IDE's symbol tool, " +
-                    "or an early-bound daemon against TcHmiAutomation.dll.");
+                    "Creating an internal symbol failed on every route. The early-bound one, which is " +
+                    "the one that normally works, said: " + (typedError == null ? "(not attempted)" : typedError) +
+                    ". The late-bound fallbacks fail as they always have (measured 2026-09-08): " +
+                    "GetInternalSymbolInstance() gives 'Specified cast is not valid', " +
+                    "GetInternalSymbolInstance_2() gives 'Missing parameter does not have a default value' " +
+                    "(so _2 is the 5-argument overload), and the 5-argument call on either name fails the " +
+                    "cast -- ITcHmiInternalSymbol does not marshal through IDispatch the way " +
+                    "ITcHmiMappedSymbol does. If the early-bound error mentions loading TcHmiAutomation, " +
+                    "point TE2000_ASSEMBLY_DIR at the directory holding TcHmiAutomation.dll.");
             t.Project.AddInternalSymbol(sym);
 
             var data = new Json.JObj();
@@ -798,9 +850,42 @@ namespace Te1000Daemon
         {
             HmiTarget t = Resolve(ctx, true);
             string name = ctx.Require("name");
+
             var data = new Json.JObj();
             data["name"] = name;
-            data["ok"] = (bool)t.Project.RemoveInternalSymbol(name);
+
+            // RemoveInternalSymbol(name) answers FALSE even on a symbol that is there and
+            // gets removed (measured 2026-09-08), so its return value is a fact about the
+            // call, not the verdict. RemoveInternalSymbol is overloaded on the symbol
+            // OBJECT too, so if the by-name call leaves it behind, fetch it and remove
+            // that -- and either way the answer comes from reading the project back.
+            bool existed = HmiTyped.ReadInternalSymbol((object)t.Project, name).Bool("found");
+            data["existed"] = existed;
+            if (!existed)
+                throw new BridgeException("There is no internal symbol named '" + name + "' in this " +
+                                          "project, so nothing was removed.");
+
+            object byName = ComHelpers.Safe<object>(delegate { return t.Project.RemoveInternalSymbol(name); });
+            data["removeByNameReturned"] = byName;
+
+            if (HmiTyped.ReadInternalSymbol((object)t.Project, name).Bool("found"))
+            {
+                try
+                {
+                    TcHmiAutomation.ITcHmiInternalSymbol sym =
+                        HmiTyped.AsProject((object)t.Project).GetInternalSymbol(name);
+                    if (sym != null)
+                        data["removeByObjectReturned"] =
+                            HmiTyped.AsProject((object)t.Project).RemoveInternalSymbol(sym);
+                }
+                catch (Exception ex) { data["removeByObjectError"] = ex.Message; }
+            }
+
+            bool gone = !HmiTyped.ReadInternalSymbol((object)t.Project, name).Bool("found");
+            data["ok"] = gone;
+            data["confirmed"] = gone;
+            if (!gone)
+                data["warning"] = "The symbol is still in the project after both remove overloads.";
             SaveIfRequested(ctx, t, data, true);
             return Stamp(t, data);
         }
@@ -1319,15 +1404,44 @@ namespace Te1000Daemon
                         ServerExtensionsWarning + " Re-run with force:true to publish anyway.");
             }
 
-            object running = ComHelpers.Safe<object>(delegate { return t.Project.IsPublishRunning(); });
-            if (running is bool && (bool)running)
+            if (IsPublishRunning(t))
                 throw new BridgeException("A publish is already running on this project.");
 
+            // Publish(profileName, updateUi = opt, progressCallback = opt). The callback is
+            // OPTIONAL AND TYPED TO AN INTERFACE, and a C# null reaches IDispatch as
+            // VT_EMPTY, which the callee cannot convert to ITcHmiPublishCallback: passing
+            // it fails the whole call with "Specified OLE variant is invalid"
+            // (DISP_E_BADVARTYPE). Measured 2026-09-08, on the first publish ever run from
+            // here -- the pre-flight was tested, this line never was. An omitted optional
+            // is passed as DISP_E_PARAMNOTFOUND, which is what the callee expects.
             bool ok;
-            try { ok = (bool)t.Project.Publish(profile, updateUi, null); }
+            try { ok = (bool)t.Project.Publish(profile, updateUi); }
             catch (Exception ex) { throw new BridgeException("Publish failed: " + ex.Message); }
 
             data["started"] = ok;
+
+            // Publish is ASYNCHRONOUS: it returns as soon as the upload is under way, so
+            // reading the result straight after gives an object with nothing in it. Wait
+            // for IsPublishRunning to go false, then read. Measured on the first real
+            // publish: 2114 files replaced by 2131, and the call had already returned.
+            int waitMs = ctx.Payload.Has("waitMs") ? ctx.Payload.Int("waitMs", PublishWaitMs) : PublishWaitMs;
+            if (waitMs < 0) waitMs = 0;
+            if (waitMs > 3600000) waitMs = 3600000;
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            bool running = IsPublishRunning(t);
+            while (running && sw.ElapsedMilliseconds < waitMs)
+            {
+                System.Threading.Thread.Sleep(250);
+                running = IsPublishRunning(t);
+            }
+            sw.Stop();
+            data["waitedMs"] = (int)sw.ElapsedMilliseconds;
+            data["completed"] = !running;
+            if (running)
+                data["warning"] = "The publish was still running after " + ((int)sw.ElapsedMilliseconds) +
+                    " ms; the result below is whatever was available at that moment. Poll " +
+                    "hmi_publish result, or raise waitMs.";
             data["result"] = ReadPublishResult(t);
             data["verdictMeans"] =
                 "ITcHmiPublishResult carries only Result / IsCompleted / SubmissionId -- there is no " +
@@ -1348,24 +1462,362 @@ namespace Te1000Daemon
             return Stamp(t, data);
         }
 
+        // GetPublishResult() is declared to return System.Object, so late binding hands
+        // back an RCW on which Result / IsCompleted / SubmissionId all read as null --
+        // which is how the first real publish reported {available:true} and no numbers at
+        // all. The result has to be asked for by interface (HmiTyped.PublishResult).
         private static Json.JObj ReadPublishResult(HmiTarget t)
         {
-            var o = new Json.JObj();
-            try
-            {
-                dynamic r = t.Project.GetPublishResult();
-                if (r == null) { o["available"] = false; return o; }
-                o["available"] = true;
-                o["result"] = ComHelpers.Safe<object>(delegate { return r.Result; });
-                o["isCompleted"] = ComHelpers.Safe<object>(delegate { return r.IsCompleted; });
-                o["submissionId"] = ComHelpers.Safe<object>(delegate { return r.SubmissionId; });
-            }
+            object raw;
+            try { raw = t.Project.GetPublishResult(); }
             catch (Exception ex)
             {
-                o["available"] = false;
-                o["error"] = ex.Message;
+                var err = new Json.JObj();
+                err["available"] = false;
+                err["error"] = ex.Message;
+                return err;
             }
-            return o;
+            return HmiTyped.PublishResult(raw);
+        }
+
+        // ================= H5: controls inside a view =======================
+        //
+        // Before this, changing what is IN a view meant editing its HTML as text, with
+        // the .hmiproj and tchmiconfig.json registrations to keep in step by hand -- the
+        // exact shortcut that loses one of the three and reports nothing. ITcHmiFile is
+        // the supported way in, and it turns out to be a full surface: GetSource /
+        // SetSource, GetAllIdentifiers / GetChildIdentifiers, GetControl, AddControl and
+        // its Before/After siblings, RemoveControl, Beautify, and ChangeAttribute(s) on
+        // the control. It does not marshal through IDispatch, so it is reached early
+        // bound (HmiTyped).
+        //
+        // Reminder that applies to every verb here: a green HMI build does NOT mean a
+        // binding is wired. Writing an attribute through this family is no different --
+        // it puts the text in the file, and only the running HMI can say it delivers.
+
+        // The ITcHmiFile for a project-RELATIVE path (e.g. "Desktop.view",
+        // "UserControls\Foo.usercontrol"). Absolute paths are refused, like the add_*
+        // verbs, so a caller cannot reach outside the project by accident.
+        private static TcHmiAutomation.ITcHmiFile ResolveFile(ActionContext ctx, HmiTarget t, out string fullPath)
+        {
+            string rel = ctx.Require("path");
+            if (Path.IsPathRooted(rel))
+                throw new BridgeException("path must be project-relative (e.g. \"Desktop.view\" or " +
+                                          "\"UserControls\\\\Foo.usercontrol\"), not absolute.");
+
+            fullPath = Path.Combine(t.ProjectDir, rel);
+            if (!File.Exists(fullPath))
+                throw new BridgeException("'" + fullPath + "' does not exist. A file the .hmiproj does " +
+                                          "not declare does not exist for build or publish either -- " +
+                                          "create it with hmi_project add_view / add_usercontrol / " +
+                                          "add_content, never by hand.");
+
+            // Walk the project's own ProjectItems, segment by segment. NOT
+            // Solution.FindProjectItem: on an HMI project it answers null even for a file
+            // the .hmiproj plainly declares (measured on Desktop.view, whose <Content
+            // Include> is right there in the file), so trusting it produced an error
+            // message that stated something false about the project.
+            dynamic dte = ctx.Dte(true);
+            dynamic item = FindHmiProjectItem(t, rel);
+            if (item == null)
+            {
+                try { item = dte.Solution.FindProjectItem(fullPath); }
+                catch { item = null; }
+            }
+            if (item == null)
+                throw new BridgeException("'" + rel + "' is on disk but neither the project's ProjectItems " +
+                                          "walk nor Solution.FindProjectItem found it. If the .hmiproj has " +
+                                          "no <Content Include> for it, add it with hmi_project add_content " +
+                                          "(or add_view / add_usercontrol) -- a file the .hmiproj does not " +
+                                          "declare does not exist for build or publish. If it IS declared, " +
+                                          "the solution has not picked it up: reload it.");
+
+            TcHmiAutomation.ITcHmiFile file = HmiTyped.GetHmiFile((object)t.Automation, (object)item);
+
+            // Editing wants the file open in the designer's model. Open() is a no-op on
+            // one that already is; nothing is closed afterwards, because closing a file
+            // the user has open in the editor is not this verb's business.
+            LastOpenState = new Json.JObj();
+            bool wasOpen = false;
+            try { wasOpen = file.IsOpen(); LastOpenState["wasOpen"] = wasOpen; }
+            catch (Exception ex) { LastOpenState["isOpenError"] = ex.Message; }
+            if (!wasOpen)
+            {
+                try { file.Open(); LastOpenState["opened"] = true; }
+                catch (Exception ex) { throw new BridgeException("Opening '" + rel + "' failed: " + ex.Message); }
+            }
+            try { LastOpenState["openAndReady"] = file.IsOpenAndReady(15000); }
+            catch (Exception ex) { LastOpenState["openAndReadyError"] = ex.Message; }
+            try { LastOpenState["isOpen"] = file.IsOpen(); }
+            catch { }
+            return file;
+        }
+
+        // What ResolveFile observed about the file's open state on this call. Reported on
+        // every response of this family, because whether the designer model is loaded is
+        // the first thing to know when a control-level call answers nothing.
+        [ThreadStatic]
+        private static Json.JObj LastOpenState;
+
+        // Descend the project tree one path segment at a time. Item() takes a name, so a
+        // relative path has to be split; a segment that is not there ends the walk.
+        private static dynamic FindHmiProjectItem(HmiTarget t, string rel)
+        {
+            if (t == null || t.Info == null || t.Info.DteProject == null) return null;
+            string[] parts = rel.Split(new char[] { '\\', '/' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length == 0) return null;
+
+            dynamic items;
+            try { items = t.Info.DteProject.ProjectItems; }
+            catch { return null; }
+
+            dynamic current = null;
+            for (int i = 0; i < parts.Length; i++)
+            {
+                if (items == null) return null;
+                current = null;
+                try { current = items.Item(parts[i]); }
+                catch { current = null; }
+                if (current == null) return null;
+                if (i == parts.Length - 1) return current;
+                try { items = current.ProjectItems; }
+                catch { return null; }
+            }
+            return current;
+        }
+
+        private static Json.JObj FileStamp(HmiTarget t, string fullPath, Json.JObj data)
+        {
+            data["file"] = fullPath;
+            if (LastOpenState != null) data["openState"] = LastOpenState;
+            return Stamp(t, data);
+        }
+
+        private static Json.JObj FileIdentifiersAction(ActionContext ctx)
+        {
+            HmiTarget t = Resolve(ctx, false);
+            string full;
+            TcHmiAutomation.ITcHmiFile file = ResolveFile(ctx, t, out full);
+            string parent = ctx.Payload.Truthy("parent") ? ctx.Payload.Str("parent") : null;
+
+            var data = new Json.JObj();
+            Json.JArr ids = HmiTyped.Identifiers(file, parent);
+            data["parent"] = parent;
+            data["count"] = ids.Count;
+            data["identifiers"] = ids;
+            return FileStamp(t, full, data);
+        }
+
+        private static Json.JObj FileSourceAction(ActionContext ctx)
+        {
+            HmiTarget t = Resolve(ctx, false);
+            string full;
+            TcHmiAutomation.ITcHmiFile file = ResolveFile(ctx, t, out full);
+
+            string src;
+            try { src = file.GetSource(); }
+            catch (Exception ex) { throw new BridgeException("GetSource failed: " + ex.Message); }
+            if (src == null) src = "";
+
+            var data = new Json.JObj();
+            data["length"] = src.Length;
+            data["source"] = src;
+            return FileStamp(t, full, data);
+        }
+
+        private static Json.JObj FileSetSourceAction(ActionContext ctx)
+        {
+            HmiTarget t = Resolve(ctx, true);
+            string full;
+            TcHmiAutomation.ITcHmiFile file = ResolveFile(ctx, t, out full);
+            string source = ctx.Require("source");
+
+            bool ok;
+            try { ok = file.SetSource(source); }
+            catch (Exception ex) { throw new BridgeException("SetSource failed: " + ex.Message); }
+
+            var data = new Json.JObj();
+            data["set"] = ok;
+            data["identifiers"] = HmiTyped.Identifiers(file, null);
+            SaveIfRequested(ctx, t, data, true);
+            return FileStamp(t, full, data);
+        }
+
+        private static Json.JObj FileControlAction(ActionContext ctx)
+        {
+            HmiTarget t = Resolve(ctx, false);
+            string full;
+            TcHmiAutomation.ITcHmiFile file = ResolveFile(ctx, t, out full);
+            string id = ctx.Require("identifier");
+
+            var how = new Json.JObj();
+            TcHmiAutomation.ITcHmiControl c = GetControlOrThrow(t, file, id, how);
+
+            var data = new Json.JObj();
+            data["identifier"] = id;
+            data["resolvedVia"] = how;
+            data["attributes"] = HmiTyped.Attributes(c);
+            data["children"] = HmiTyped.Identifiers(file, id);
+            return FileStamp(t, full, data);
+        }
+
+        private static TcHmiAutomation.ITcHmiControl GetControlOrThrow(
+            HmiTarget t, TcHmiAutomation.ITcHmiFile file, string id, Json.JObj how)
+        {
+            TcHmiAutomation.ITcHmiControl c = HmiTyped.FindControl((object)t.Project, file, id, how);
+            if (c != null) return c;
+
+            // A miss lists what IS there rather than answering nothing -- the same
+            // contract as attach / select_project, one level further down. And when the
+            // id IS in that list, say so: the failure is then the interface's, not the
+            // caller's, and telling the two apart is the whole point of the message.
+            Json.JArr ids = HmiTyped.Identifiers(file, null);
+            bool listed = false;
+            foreach (object o in ids) if (string.Equals(o as string, id, StringComparison.Ordinal)) { listed = true; break; }
+
+            if (!listed)
+                throw new BridgeException("No control with id '" + id + "' in this file. Ids: " +
+                                          Json.Write(ids) + ".");
+
+            throw new BridgeException("'" + id + "' IS in this file (GetAllIdentifiers lists it) but no " +
+                "control object came back for it. Measured 2026-09-08 on TE2000: ITcHmiFile.GetControl " +
+                "answers null for every identifier, freshly added ones included, with the file open and " +
+                "IsOpenAndReady true, and ITcHmiProject.GetControlInstance does not take an identifier " +
+                "either. So reading and changing the ATTRIBUTES of an existing control is not reachable " +
+                "on this build; what works is hmi_file add_control (attributes are set at creation), " +
+                "remove_control, and source / set_source. Routes tried: " + Json.Write(how) + ".");
+        }
+
+        private static Json.JObj FileAddControlAction(ActionContext ctx)
+        {
+            HmiTarget t = Resolve(ctx, true);
+            string full;
+            TcHmiAutomation.ITcHmiFile file = ResolveFile(ctx, t, out full);
+
+            string id = ctx.Require("identifier");
+            string type = ctx.Require("type");
+            string parent = ctx.Payload.Truthy("parent") ? ctx.Payload.Str("parent") : null;
+            string before = ctx.Payload.Truthy("before") ? ctx.Payload.Str("before") : null;
+            string after = ctx.Payload.Truthy("after") ? ctx.Payload.Str("after") : null;
+
+            int placements = (parent != null ? 1 : 0) + (before != null ? 1 : 0) + (after != null ? 1 : 0);
+            if (placements == 0)
+                throw new BridgeException("say where it goes: parent (append inside it), before or after " +
+                                          "(next to that sibling).");
+            if (placements > 1)
+                throw new BridgeException("parent, before and after are three different placements; " +
+                                          "name exactly one.");
+
+            TcHmiAutomation.ITcHmiControlAttribute[] attrs =
+                HmiTyped.BuildAttributes((object)t.Project, ctx.Payload.Arr("attributes"));
+
+            TcHmiAutomation.ITcHmiControl created;
+            string how;
+            try
+            {
+                if (parent != null) { created = file.AddControl(parent, id, type, attrs); how = "AddControl"; }
+                else if (before != null) { created = file.AddControlBefore(before, id, type, attrs); how = "AddControlBefore"; }
+                else { created = file.AddControlAfter(after, id, type, attrs); how = "AddControlAfter"; }
+            }
+            catch (Exception ex) { throw new BridgeException("Adding '" + id + "' failed: " + ex.Message); }
+
+            var data = new Json.JObj();
+            data["identifier"] = id;
+            data["type"] = type;
+            data["via"] = how;
+            // AddControl returns NULL even when it has added the control (measured
+            // 2026-09-08: the identifier list went from 6 entries to 7 while the call
+            // answered null). So its return value is reported as what it is -- a fact
+            // about the call -- and the VERDICT comes from reading the file back.
+            data["controlReturned"] = created != null;
+            Json.JArr ids = HmiTyped.Identifiers(file, null);
+            bool present = false;
+            foreach (object o in ids) if (string.Equals(o as string, id, StringComparison.Ordinal)) { present = true; break; }
+            data["added"] = present;
+            data["confirmed"] = present;
+            if (created != null) data["attributes"] = HmiTyped.Attributes(created);
+            data["verdictMeans"] = "The control is in the file. Whether its bindings DELIVER is a " +
+                                   "different question -- a misspelled binding attribute builds green " +
+                                   "with an empty Error List; only the running HMI can answer it.";
+            SaveIfRequested(ctx, t, data, true);
+            return FileStamp(t, full, data);
+        }
+
+        private static Json.JObj FileChangeAttributesAction(ActionContext ctx)
+        {
+            HmiTarget t = Resolve(ctx, true);
+            string full;
+            TcHmiAutomation.ITcHmiFile file = ResolveFile(ctx, t, out full);
+            string id = ctx.Require("identifier");
+
+            Json.JArr spec = ctx.Payload.Arr("attributes");
+            if (spec == null || spec.Count == 0) throw new BridgeException("attributes is required");
+
+            var how = new Json.JObj();
+            TcHmiAutomation.ITcHmiControl c = GetControlOrThrow(t, file, id, how);
+            TcHmiAutomation.ITcHmiControlAttribute[] attrs = HmiTyped.BuildAttributes((object)t.Project, spec);
+
+            bool ok;
+            try { ok = c.ChangeAttributes(attrs); }
+            catch (Exception ex) { throw new BridgeException("ChangeAttributes on '" + id + "': " + ex.Message); }
+
+            var data = new Json.JObj();
+            data["identifier"] = id;
+            data["changed"] = ok;
+            data["resolvedVia"] = how;
+            data["attributes"] = HmiTyped.Attributes(c);
+            data["verdictMeans"] = "The attribute is written. A binding attribute that is written is not " +
+                                   "a binding that delivers -- check it on the running HMI.";
+            SaveIfRequested(ctx, t, data, true);
+            return FileStamp(t, full, data);
+        }
+
+        private static Json.JObj FileRemoveControlAction(ActionContext ctx)
+        {
+            HmiTarget t = Resolve(ctx, true);
+            string full;
+            TcHmiAutomation.ITcHmiFile file = ResolveFile(ctx, t, out full);
+            string id = ctx.Require("identifier");
+
+            // Refuse an id that is not in the file instead of reporting a cheerful false:
+            // a remove that "succeeded" on nothing is how a typo passes for a change. The
+            // check is the identifier LIST, not GetControl, which answers null for
+            // everything on this build (see GetControlOrThrow).
+            Json.JArr before = HmiTyped.Identifiers(file, null);
+            bool known = false;
+            foreach (object o in before) if (string.Equals(o as string, id, StringComparison.Ordinal)) { known = true; break; }
+            if (!known)
+                throw new BridgeException("No control with id '" + id + "' in this file. Ids: " +
+                                          Json.Write(before) + ".");
+
+            bool ok;
+            try { ok = file.RemoveControl(id); }
+            catch (Exception ex) { throw new BridgeException("RemoveControl('" + id + "'): " + ex.Message); }
+
+            var data = new Json.JObj();
+            data["identifier"] = id;
+            data["removed"] = ok;
+            Json.JArr ids = HmiTyped.Identifiers(file, null);
+            bool stillThere = false;
+            foreach (object o in ids) if (string.Equals(o as string, id, StringComparison.Ordinal)) { stillThere = true; break; }
+            data["confirmed"] = !stillThere;
+            SaveIfRequested(ctx, t, data, true);
+            return FileStamp(t, full, data);
+        }
+
+        private static Json.JObj FileBeautifyAction(ActionContext ctx)
+        {
+            HmiTarget t = Resolve(ctx, true);
+            string full;
+            TcHmiAutomation.ITcHmiFile file = ResolveFile(ctx, t, out full);
+
+            try { file.Beautify(); }
+            catch (Exception ex) { throw new BridgeException("Beautify failed: " + ex.Message); }
+
+            var data = new Json.JObj();
+            data["beautified"] = true;
+            SaveIfRequested(ctx, t, data, true);
+            return FileStamp(t, full, data);
         }
 
         // ================= file / project plumbing ==========================

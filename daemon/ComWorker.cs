@@ -37,6 +37,7 @@ namespace Te1000Daemon
     internal sealed class WorkItem
     {
         public Func<Json.JObj> Job;            // runs on the STA thread
+        public string Action;                  // for the busy report; diagnostics only
         public readonly ManualResetEventSlim Done = new ManualResetEventSlim(false);
         public WorkResult Result;
     }
@@ -72,6 +73,49 @@ namespace Te1000Daemon
         // the Dispatcher can serve a COM-free `dialog_probe` diagnostic action.
         public DialogWatcher Watcher { get { return _watcher; } }
 
+        // ---- what the single STA thread is doing right now ------------------
+        //
+        // "Busy" and "wedged" look identical from outside, and that is the whole
+        // complaint about a cold open_solution: it takes longer than its budget, and
+        // every later call waits behind it, so status and list_instances -- the two
+        // reads that exist to be safe to call IN ORDER TO DECIDE -- time out too and
+        // the server reads as broken. It cannot be made to answer faster, but it can
+        // say what it is doing and for how long, and that turns a dead server into a
+        // busy one.
+        private volatile string _currentAction;
+        private long _currentStartedTicks;
+        private int _queued;
+
+        public bool Busy { get { return _currentAction != null; } }
+        public string CurrentAction { get { return _currentAction; } }
+        public int Queued { get { return Thread.VolatileRead(ref _queued); } }
+
+        public long BusyForMs
+        {
+            get
+            {
+                long started = System.Threading.Interlocked.Read(ref _currentStartedTicks);
+                if (started == 0) return 0;
+                long ms = (System.Diagnostics.Stopwatch.GetTimestamp() - started) * 1000L /
+                          System.Diagnostics.Stopwatch.Frequency;
+                return ms < 0 ? 0 : ms;
+            }
+        }
+
+        public Json.JObj BusyReport()
+        {
+            var o = new Json.JObj();
+            string action = _currentAction;
+            o["busy"] = action != null;
+            if (action != null)
+            {
+                o["action"] = action;
+                o["busyForMs"] = (int)BusyForMs;
+            }
+            o["queued"] = Queued;
+            return o;
+        }
+
         private void StartThread()
         {
             _queue = new BlockingCollection<WorkItem>();
@@ -88,6 +132,10 @@ namespace Te1000Daemon
 
             foreach (var item in _queue.GetConsumingEnumerable())
             {
+                Interlocked.Decrement(ref _queued);
+                _currentAction = item.Action ?? "<unnamed>";
+                Interlocked.Exchange(ref _currentStartedTicks, System.Diagnostics.Stopwatch.GetTimestamp());
+
                 WorkResult res = new WorkResult();
                 try
                 {
@@ -108,6 +156,8 @@ namespace Te1000Daemon
                     res.Error = ex.Message;
                     res.Kind = ErrorKind.ComError;
                 }
+                _currentAction = null;
+                Interlocked.Exchange(ref _currentStartedTicks, 0);
                 item.Result = res;
                 item.Done.Set();
             }
@@ -117,13 +167,19 @@ namespace Te1000Daemon
         // timeout and the modal-dialog grace window. Returns the WorkResult.
         internal WorkResult Run(Func<Json.JObj> job, int timeoutMs)
         {
+            return Run(job, timeoutMs, null);
+        }
+
+        internal WorkResult Run(Func<Json.JObj> job, int timeoutMs, string action)
+        {
             if (_disposed) throw new ObjectDisposedException("ComWorker");
             int budget = timeoutMs > 0 ? timeoutMs : _defaultTimeoutMs;
 
             WorkItem item;
             lock (_lifecycleGate)
             {
-                item = new WorkItem { Job = job };
+                item = new WorkItem { Job = job, Action = action };
+                Interlocked.Increment(ref _queued);
                 _queue.Add(item);
             }
 
@@ -159,7 +215,10 @@ namespace Te1000Daemon
                     {
                         Ok = false,
                         Kind = ErrorKind.Timeout,
-                        Error = "Call exceeded timeout of " + budget + " ms; no modal dialog detected — XAE may be busy."
+                        Error = "Call exceeded timeout of " + budget + " ms; no modal dialog detected -- XAE may be busy. " +
+                                "What the STA thread was doing: " + Json.Write(BusyReport()) + ". A cold " +
+                                "open_solution is the usual one: start devenv on the solution with the OS, " +
+                                "wait for its window title, then xae attach pid:<pid>."
                     };
                 }
             }

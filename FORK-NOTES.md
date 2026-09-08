@@ -432,7 +432,299 @@ mapped-symbol listing (60 symbols); `config_set` with readback for a string, a n
 an enum, plus the two refusals; build; publish-profile reading; and the four tools end to
 end through the MCP front, including the publish confirmation gate. **`hmi_publish
 publish` itself was NOT run**: it would have replaced a live server instance, and there
-was nothing safe to publish to.
+was nothing safe to publish to. That is no longer true — see §16.
+
+---
+
+### 12. `xae output` — the window where a build explains itself
+
+A solution build that breaks inside one PLC project can leave a **single** Error List row:
+
+```
+'TwinCAT XAE': Project 'X' build for platform 'TwinCAT OS (x64)' failed.
+```
+
+No file, no code, no compiler row. The reason is in the **Output** window, and nothing
+exposed it, so "failed, no idea why" meant opening that project's own solution by hand and
+building it there to see what the first build had already printed.
+
+`xae output` returns the last N lines of a pane (`pane`, default `"Build"`; `tail`, default
+200) together with the pane names. Three details, all of them measured rather than assumed:
+
+- **Panes are matched exactly first, then as a case-insensitive substring**, because the
+  names are localized. `"Source Control"` matches that pane and not
+  `"Source Control - Team Foundation"`.
+- **A pane that is not there is an error listing the ones that are** — the `attach` /
+  `select_project` contract one level down, never a silent fallback onto another pane.
+- **Not every pane has readable text.** The Source Control panes answer `E_FAIL` from
+  `TextDocument`. That is a property of the pane, so the message says which pane, that
+  another one may well work, and lists them.
+
+The window is reached through `dte.ToolWindows.OutputWindow`, falling back to
+`dte.Windows.Item(vsWindowKindOutput).Object` for an IDE that has never shown it.
+
+### 13. `save: true` did not save — on the singular verbs it did nothing at all
+
+The symptom was known and had a workaround in the notes: a `plc_pou create` with
+`save:true`, followed by `open_solution` with `discardChanges:true`, lost the object — the
+`.TcPOU` was on disk but the `.plcproj` never got its `<Compile Include>`, and the type then
+failed to resolve everywhere with `Unknown type: 'X'`, which reads like a broken library
+reference rather than a lost project entry. The same sequence with a **separate**
+`xae save_all` call worked, so the cause was assumed to be timing.
+
+It was not. Two defects, and the second is the larger:
+
+1. **`File.SaveAll` is a shell COMMAND, not a method call.** `ExecuteCommand` QUEUES it and
+   returns before the save has landed. Every save in the daemon went through that one line,
+   so an in-call save was a request, not an event. A separate call worked for one reason
+   only: two pipe round trips let time pass.
+2. **The singular verbs ignored `save` outright.** `create`, `create_folder`, `delete`,
+   `move`, `rename`, `set_decl`, `set_impl` and `set_document` never looked at the flag,
+   while their `_batch` counterparts honoured it. So `set_impl` with `save:true` was a
+   no-op that reported success — someone could believe their code was on disk when nothing
+   had been written.
+
+Both are fixed. `XaeActions.SaveAllAndSettle` issues the command and then **waits for the
+IDE to report itself clean** — documents, solution and projects — asking any project that
+stays dirty to `Save()` itself halfway through the budget, because `Project.Save()` is a
+call and has finished when it returns. The report reaches the caller on every verb that
+takes `save` (attached by the dispatcher, since a dozen handlers each build their own
+result object):
+
+```
+"save": { "saved": true, "settled": true, "waitedMs": 152 }
+```
+
+and a save still dirty at the end of its budget is reported as **unsettled**, with what is
+still dirty and a warning not to reopen the solution with `discardChanges` until it
+settles. Measured before and after on the same call: the `<Compile Include>` was absent
+from the `.plcproj` immediately after a `create save:true`, and present immediately after
+the fix, with no second call in between.
+
+### 14. `save_as_library` blamed the wrong thing, and could not overwrite
+
+Exporting onto an existing `.library` failed with:
+
+```
+node 'TIPC^X^X Project' does not implement ITcPlcIECProject (use the nested project
+instance node): File '...\X.library' already exist. Cannot SaveAsLibrary!
+```
+
+The head of that sentence contradicts the tail. The catch claimed a missing interface
+**whatever** went wrong, so the real reason arrived as a suffix to a false diagnosis. Now
+the node is asked whether it implements the interface, and only told so when it does not:
+
+- wrong node (the PLC ROOT) → still the interface message, and now it names the shape of
+  the right path;
+- right node, anything else → `SaveAsLibrary failed on '<node>': <the actual error>`.
+  Measured on a project with no library info: *"The specified library is not a managed
+  library. (Reason: 'Title' not specified.)"* — which the old wrapper hid.
+
+And `overwrite` (default false, like `install_library`'s) deletes the target first and
+reports `replacedExisting`. Without it an existing file is refused **by name**, before the
+COM call. The response also carries `fileWritten`, read back from disk: a call that returns
+without throwing is not by itself proof that a file arrived.
+
+### 15. Starting from nothing: a solution, and a TwinCAT project in it
+
+There was no way to begin. `plc_project create_from_template` needs a `.tsproj` that
+already exists, and handing a `.tsproj` to `open_solution` fails with `E_ABORT`, so a new
+repo was made by copying an old one and rewriting names and GUIDs by hand.
+
+- `xae create_solution` (`directory`, `name`) — `Solution.Create` then `SaveAs`, because
+  `Create` builds the solution in memory and a solution that is not on disk cannot be
+  reopened or committed. `solutionFileWritten` is read back from disk. Creating a solution
+  **closes** whatever is open, so an open solution is refused unless `closeExisting:true`.
+- `xae add_project` (`name`, `directory?`, `templatePath?` / `templateName?`) —
+  `Solution.AddFromTemplate`. Reports `tsProjectWritten`, found on disk, rather than the
+  call it made.
+- `xae find_project_template` — read-only, and the reason the other two work.
+
+**Where the XAE project template actually is.** `Solution2.GetProjectTemplate(name,
+language)` is the documented way to locate a template, and it answers `FileNotFound` for
+every name one might guess. Searched on 2026-09-08: the VS extension tree, both template
+caches, and both TwinCAT install roots contain **no `.vstemplate` and no template zip** for
+it. There is exactly one candidate on the machine:
+
+```
+C:\Program Files (x86)\Beckhoff\TwinCAT\3.1\Components\Base\PrjTemplate\
+    TwinCAT Project.tsproj      67 bytes: <TcSmProject><Project/></TcSmProject>
+    tsmprojects.vsdir           the old-style registration
+    TwinCAT Project.ico
+```
+
+An old-style `.vsdir` template, not a `.vstemplate` — which is why `GetProjectTemplate`
+cannot see it under any spelling. The project factory expands the stub when the project
+opens. So the resolution order is: explicit `templatePath`, then a named
+`templateName`/`templateLanguage` pair, then **the stub on disk** (probed under
+`TWINCAT3DIR` first, since that is what the installer sets), then the name candidates for
+a shell that does register a real template. `find_project_template` reports every route it
+tried, so the answer is a measurement.
+
+One more trap on the way in: `GetProjectTemplate` lives on `Solution2`, not `Solution`, and
+late-bound `dynamic` cannot see it — every call answers *"'System.__ComObject' does not
+contain a definition for 'GetProjectTemplate'"*, which reads like a missing method rather
+than a missing interface. And casting inline (`(Solution2)dte.Solution`) does not help: the
+operand is `dynamic`, so the whole expression stays on the DLR and the lookup happens on
+`__ComObject` again, with the same message. The hand-off out of `dynamic` has to be an
+ordinary assignment to `object` first.
+
+**Exercised end to end** on a throwaway directory: empty solution created and saved, a
+TwinCAT project added (`Mc4Tc.tsproj` on disk), a PLC project created inside it from the
+Standard PLC Template (`Mc4Plc.plcproj` on disk), and POUs created in it — a whole project
+tree from nothing, in one IDE that never had a solution open.
+
+### 16. The HMI side, finished
+
+The three pieces §11 deliberately left out.
+
+**`hmi_publish publish` has now been run for real** — and it failed on the first attempt,
+which is the whole argument for running a thing before calling it done:
+
+```
+Publish failed: Specified OLE variant is invalid.
+```
+
+`Publish(profileName, updateUi = opt, progressCallback = opt)`: the callback is **optional
+and typed to an interface**, and a C# `null` reaches IDispatch as `VT_EMPTY`, which the
+callee cannot convert to `ITcHmiPublishCallback` — `DISP_E_BADVARTYPE`, and the whole call
+dies. An omitted optional is passed as `DISP_E_PARAMNOTFOUND`, which is what it expects, so
+the argument had to go away rather than be nulled.
+
+With that fixed the publish landed: 2114 files replaced by 2131 on the target instance, and
+the check the tool's own `verdictMeans` prescribes came out right — `PROJECTNAME` updated at
+`1787927547`, `RUNTIMES::AUT_Workbench::NETID` and `RUNTIMES::AUT_Workbench_DT::NETID` at
+`1787927548`, one second newer. The server-extension configuration was pushed, not just the
+upload. Two further findings:
+
+- **Publish is asynchronous.** It returns while the upload is still running, so the result
+  read straight afterwards is empty. The verb now waits for `IsPublishRunning` to go false
+  (`waitMs`, default 10 min) and reports `waitedMs` and `completed`.
+- **`GetPublishResult()` answers a plain `Boolean`** on this TE2000 build, not an
+  `ITcHmiPublishResult` — which is the real reason the late-bound `Result` / `IsCompleted` /
+  `SubmissionId` reads all came back null. §11 recorded those three fields from reflection
+  on the interface; the object does not implement it. So the result is reported as the bool
+  it is, with a note that it means the call succeeded and not that the configuration landed.
+- Publishing **rewrites the profile file itself** (`tcHmiServerPort` becomes a number,
+  `socketTimeout` appears) and touches `engineering.html`. Expect both at `git status`.
+
+**Internal symbols work.** `TcHmiAutomation.dll` is now referenced (resolved at runtime by
+`VsInterop` from the TE2000 directories, like the PIAs; `TE2000_ASSEMBLY_DIR` overrides),
+and `HmiTyped` casts the late-bound RCW to the typed interfaces. The assembly is
+`[ComVisible(true)]` with a Guid per interface, so this is not a workaround: when late
+binding cannot see a member, ask for the interface by IID. `hmi_symbol internal_add` and
+`internal_remove` are exposed and exercised — created, read back with all five fields
+(`name`, `datatype`, `defaultValue`, `persist`, `readOnly`), removed, confirmed gone. Note
+that **`RemoveInternalSymbol` returns FALSE on a symbol it has just removed**, so its
+return value is reported as a fact about the call and the verdict comes from reading the
+project back.
+
+One trap worth its own line: `TcHmiAutomation` is built against **envdte 8.0.0.0** while
+this daemon references the 17.0.0.0 facade, and both are on the machine (MSB3247 at build
+time). Naming `EnvDTE.ProjectItem` in our own code would pin `GetHmiFile`'s parameter to
+*our* version and hand the callee a type it does not recognise, so the argument is passed
+as a raw `object` through reflection and the conversion happens in TcHmiAutomation's own
+binding context.
+
+**`ITcHmiFile` — controls instead of HTML as text.** `hmi_file` exposes `identifiers`,
+`source` / `set_source`, `add_control` (with `parent` / `before` / `after`, exactly one),
+`remove_control`, `beautify` and `control`. Exercised on a real `Desktop.view`: the six
+control ids enumerated, a control added inside the view, confirmed by re-reading the file,
+removed, and the file left **byte-identical** to before.
+
+Two measured limits, both reported by the verbs themselves rather than left to be
+discovered:
+
+- **`AddControl` returns null even when it has added the control.** The identifier list
+  went from 6 entries to 7 while the call answered null. So the return value is reported as
+  `controlReturned` and `added`/`confirmed` come from reading the file.
+- **`ITcHmiFile.GetControl` answers null for every identifier** — ids it has just listed,
+  controls just created, with the file open and `IsOpenAndReady` true — and
+  `ITcHmiProject.GetControlInstance` wants a DOM node, not an id (*"invalid argument in
+  constructor: node is null"*). So reading or changing the attributes of an **existing**
+  control is out of reach on this build. `control` and `change_attributes` exist and say
+  exactly that, with the routes they tried; `add_control` (attributes set at creation),
+  `remove_control` and `source`/`set_source` are what work.
+
+The file itself is located by walking the project's own `ProjectItems`, **not**
+`Solution.FindProjectItem`, which answers null on an HMI project even for a file the
+`.hmiproj` plainly declares — measured on `Desktop.view`, whose `<Content Include>` is right
+there in the file. Trusting it produced an error message that stated something false about
+the project.
+
+### 17. Busy is not wedged
+
+Opening a solution on a **cold** IDE does not fit in the ordinary 180 s ceiling: VS2022 plus
+the XAE extension starting from scratch runs past it, the call dies for no reason the caller
+can see, and then — because the pipe was serial per connection — every later call queued
+behind it. `xae status` and `list_instances`, which exist precisely to be safe to call *in
+order to decide*, timed out too, and the server read as broken rather than busy.
+
+Three changes, and the third is the one that matters:
+
+- **`xae_open_solution` gets its own 10-minute budget.** Not an infinite wait: an IDE that
+  never comes up is worse. On a warm IDE the same call is effectively instant, so this
+  costs nothing in the normal case.
+- **Each request on a connection is handled on its own thread.** The client keeps one
+  connection and correlates replies by id, which is what the id was always for, so nothing
+  about COM changes — the single STA worker still serializes every call that needs the IDE
+  — but a reply that IS ready now gets out now. One lock guards a whole response line plus
+  its flush; interleaved bytes would break the framing for everything after them.
+- **The daemon says what it is doing.** `ComWorker` reports the action in flight, how long
+  it has been running and how many calls are queued. That report is on every timeout error,
+  and `xae status` / `list_instances` are answered **without the STA thread** while it is
+  busy — from the running-object table plus each process's window title, with no call into
+  any IDE, because asking a busy IDE what it has open would block on the very thing being
+  reported. What is missing from that answer (`isCurrent`, `startedByUs`, the solution
+  *path*) is named in it: a partial answer that says which part is partial beats a timeout,
+  and beats a full answer that is quietly a guess.
+
+Measured during an 82-second rebuild, all three on the same connection: `ping` answered in
+54 ms, `list_instances` in 87 ms, `status` in 96 ms, each naming `xae_solution_build` and
+its elapsed time. At rest the full answers come back unchanged.
+
+### 18. `plc_tests` — the verdict the tests actually give
+
+The one thing that still forced the CI to be the source of truth for whether the code works:
+the server could compile and read the Error List, but not say whether the tests passed.
+
+`plc_tests run` is guarded (`ALLOW_PLC_TESTS`) and does the sequence that was proven by
+hand: set the PLC project's boot autostart flag → save and build, stopping on a non-zero
+`lastBuildInfo` → **delete** `<runtime>\Boot\tcunit_xunit_testresults.xml` → activate →
+restart the runtime → wait for the file to reappear *and settle* → parse. Then it puts the
+boot flag back the way it found it, because flipping it was this action's doing and not the
+caller's intent.
+
+Four things it will not do quietly:
+
+- **The delete is not optional.** Without it you read the previous run's file and have no
+  way to tell — same shape, same numbers, no clue. If the delete fails, the run is refused
+  rather than started, because a run that produces nothing would then be
+  indistinguishable from one that passed.
+- **The totals are SUMMED from the `<testsuite>` elements.** The root `<testsuites tests>`
+  attribute does not count the failures: a run with 3 red wrote `tests="65"` while its
+  suites summed to 68. The attribute is reported separately and a disagreement is flagged
+  — anyone reading it alone gets a total short by exactly the interesting cases.
+- **Which Boot directory is matched to the target NetId**, never picked by convention. An
+  engineering host has several user-mode runtimes (here `UmRT_Default`, `UmRT_Machine`,
+  `UmRT_DT`) and each one's `3.1\TcRegistry.xml` carries its own AmsNetId as **binary hex**
+  — `C7042AFA0101` is `199.4.42.250.1.1`. No match is an error listing what was found:
+  reading the wrong directory would report another target's numbers as these.
+- **Activation replaces what is running on the target**, and the result says so every time.
+  Putting back what was there is the caller's job and is easy to forget.
+
+The same tally also arrives in the Error List as `PlcTask` rows at severity **High** —
+which the PLC compiler never uses, so runtime messages *can* be told apart by severity even
+though compiler rows cannot. Those rows are returned as an independent cross-check: two
+sources agreeing is a verdict, one source is a reading.
+
+**Exercised end to end** on `AUT_StandardDevices_Test`: both guards refused first (no
+project chosen; no `confirm`), then build `lastBuildInfo: 0`, the previous 35068-byte file
+deleted with its timestamp recorded, activate + restart, results back in **13.7 s**, parsed
+to **238 tests / 0 failures across 9 suites**, boot flags restored — and the Error List rows
+at `vsBuildErrorLevelHigh` said `Successful tests: 238` / `Failed tests: 0`, matching.
+`plc_tests results` parses whatever file is on disk and warns that its age says nothing
+about the code you are asking about.
 
 ---
 
@@ -451,7 +743,7 @@ per PR, so a reviewer never has to read a commit that belongs to another fix.
 | 2026-08-27 | `f1d079c` | — | This file, linked from the README. |
 | 2026-08-27 | `57e7d89` | §7 | `xae list_instances` / `attach` / `forceNew`, and a session cache that honours the request instead of keying on `progId` alone. |
 | 2026-08-27 | `69fac74` | §7 | `shutdown_ide` honours an explicit instance target rather than closing whichever IDE the session happened to hold. |
-| 2026-09-01 | `87f8887` | — | [BACKLOG.md](BACKLOG.md): rough edges and missing capabilities measured in a full day of real use. |
+| 2026-09-01 | `87f8887` | — | `BACKLOG.md`: rough edges and missing capabilities measured in a full day of real use. Removed once they were all built or recorded here — see **Still to do**. |
 | 2026-09-02 | `4af5433` | §8, §9 | `xae list_projects` / `select_project`, per-call `tsProject`, `TE1000_DEFAULT_TSPROJECT`, ambiguity declared on reads and refused by the target-changing verbs; `list_configurations` / `set_configuration`, per-project `xae_build`, and the typed `PlatformName` read. |
 | 2026-09-03 | `89997d5` | §10 | `string[]` vInfo for the members of a POU, so 609 Method, 608 Action and 616 Transition can be created; `accessor` and `implSeed`; interface members 610 / 612 / 654 / 655; accessors may omit their name; the create guard resolves the tree before declaring a failure. |
 | 2026-09-08 | `9de0090` | §11 | TwinCAT HMI (TE2000): `hmi_project` / `hmi_symbol` / `hmi_function` / `hmi_publish`, the pkgdef-resolved automation ProgId, the HMI project walk and session cache, and the publish pre-flight that refuses a profile which would skip the server-extension configuration. |
@@ -481,23 +773,88 @@ and a fork writing into it would collide on every merge from `upstream`.
 - **The `ALLOW_*` tokens are not a human gate.** They are parameters the agent writes
   itself, enforced in `index.js`. The real gate is the MCP client's own permission
   prompt.
+- **`BuildVInfo` carries two vInfo shapes, on purpose.** Creating the MEMBERS of a POU
+  needs a `string[]` with the IEC language spelled out (`"ST"`); the top-level POU types
+  and the Property have always been created with an `object[]` holding the language as a
+  number (§10). Both work, and only the first is what Beckhoff's own samples use. The
+  `object[]` cases are left alone deliberately: they are the ones proven in daily use, and
+  a preventive sweep would put the whole authoring path at risk to gain consistency and
+  nothing else. Worth aligning the day something already touches those cases — with 602,
+  603, 604 and 611 all re-tested, not assumed.
+- **Two identical builds of the daemon produce different bytes.** `Te1000Daemon.csproj`
+  sets `<Deterministic>true</Deterministic>` and the in-box MSBuild compiler
+  (`Framework64\v4.0.30319`) ignores it. Measured 2026-09-08 — same source, same
+  configuration, same output directory, `obj` deleted in between:
+  `48BA5514…` then `7186BA29…`. So "rebuild and compare the hash" proves nothing about an
+  install, and a mismatch is **not** evidence of a source difference — which is the worse
+  half, because it sends you looking for a change that is not there. Install by **copying**
+  the binary that passed the tests into `bin\Release`; then the hashes are equal by
+  construction and the check is real.
+- **The front and the daemon reload differently.** `Te1000Daemon.exe` is its own process
+  and comes back on the next call, so a daemon change can be tested immediately (stop it,
+  rebuild, call). `index.js` and `toolSchemas.js` are loaded by the MCP client at session
+  start, so a new tool or parameter is **not visible until the session restarts** — until
+  then, drive the new daemon action through `daemonClient.js`.
 
 ---
 
 ## Still to do
 
-The working list — rough edges hit in real use, missing capabilities in order of value,
-and what is deliberately out of scope — lives in [BACKLOG.md](BACKLOG.md). The summary:
+There used to be a separate `BACKLOG.md` here. It is gone: everything on it was either
+built (§12-§18), or was never a defect and is now recorded under **Things to know** above
+— the two `vInfo` shapes, and the non-deterministic daemon build. Keeping a working list
+alongside a record of what was measured meant the same facts written twice, drifting apart.
 
-- Send each fix above upstream as its own PR.
-- Add what our CI needs and this server does not have yet: running the TcUnit suite
-  (without the runtime restart other servers do), `RunStaticAnalysis()` +
-  `ExportToSarif()`, and documentation generation.
-- Finish the HMI side: internal symbols (they need the daemon to bind
-  `TcHmiAutomation.dll` early, see §11), `ITcHmiFile` control-level editing for placing
-  widgets and bindings without touching HTML as text, and an `hmi_publish publish` that
-  has actually been run end to end.
-- A guard for contention on a shared user-mode runtime. When an IDE, a CI runner and
+What is left:
+
+- **Send each fix above upstream as its own PR.** That is what the change log's
+  one-section-per-row shape is for.
+- **Static analysis and documentation.** `RunStaticAnalysis()` + `ExportToSarif()` and doc
+  generation are the last two things `TcCIBuilder` has that this does not, and therefore
+  the last reason `ci.yml` shells out to it (steps 9 and 11). The test verdict no longer
+  is — see §18.
+- **Getting the data out of a Scope recording.** `tc_measurement` can create a Scope
+  project, add children, rename them and start/stop a recording, but not **retrieve** what
+  was recorded: `IMeasurementScope` exposes `SaveSVD`, `ExportCSV` and `LookUpChild` and
+  `MeasurementActions.cs` leaves all three unexposed, marked UNVERIFIED. Start/stop
+  without export is a button, not a measurement, and it blocks the obvious workflow —
+  record a machine cycle, export it, compare it against the previous run. Verification is
+  cheap (call them by reflection the way `ScopeHelper` already calls `CreateChild` /
+  `StartRecord`), but four things have to be pinned down before they are exposed: the
+  **signatures** (the four verified calls return an `int` rc; assume the same until
+  measured), whether the paths are absolute and what happens when the file exists
+  (silently overwrite is the likely answer, and the verb should say so), whether either
+  call is **synchronous** — an export that returns before the file is complete hands the
+  caller a truncated read, which looks like corrupt data — and whether they can be called
+  **while recording** or only after `StopRecord`. Like `analytics_create`, none of it means
+  anything without a live target and a real channel, so the test needs more than a project
+  node.
+- **A guard for contention on a shared user-mode runtime.** When an IDE, a CI runner and
   this server share one UmRT, activating or running tests from here can disturb a build
-  someone else is in the middle of. That is not specific to us — anyone running a CI
-  runner on the engineering host has it — so it belongs upstream too.
+  someone else is in the middle of — and §18 makes that easier to do by accident, not
+  harder. Not specific to us: anyone running a CI runner on the engineering host has it,
+  so it belongs upstream too.
+
+### Not the server's problem
+
+Recorded so they are not mistaken for bugs here.
+
+- **A stale installed library.** After rebuilding a base library, a consumer can fail with
+  errors pointing at a library nobody touched. The cure is to rebuild and reinstall that
+  intermediate library — and only that one: the link that breaks is the one between the
+  changed library and the consumer that failed, not the whole chain.
+- **Incremental build after an out-of-band library change.** Once a library has been
+  rebuilt elsewhere, the consumer needs `rebuild`, not `build`; the incremental one fails
+  with the reasonless message §12 exists to explain.
+- **`{attribute 'hide'}` removes a member from the ADS symbol table**, so an HMI binding
+  onto it goes quiet. A PLC-side decision, not an automation one.
+- **`plc_pou rename` trips a CoDeSys assertion.** Renaming a DUT raises a modal
+  `Assertion Failed: Abort=Quit, Retry=Debug, Ignore=Continue` with a stack through
+  `_3S.CoDeSys.UML.DiagramController` — `RefactoringPerformer.PerformRefactoring` loading
+  every object and tripping over the UML context, on a project that has no diagrams at
+  all. **Ignore** completes the rename correctly, references included, and several arrive
+  in a row; each one blocks the daemon until it is answered. Not our bug, but ours to live
+  with, so there is now a ready-made rule for it in `dialog-allowlist.json` — as an
+  **example**, not in `rules`. Auto-clicking through an assertion is exactly the rule that
+  will one day hide a real failure, so switching it on has to be a decision someone made:
+  copy it in before a batch of renames, take it out afterwards.

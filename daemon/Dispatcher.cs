@@ -44,6 +44,7 @@ namespace Te1000Daemon
             LicenseVariantActions.Register(_handlers);
             NcActions.Register(_handlers);
             SessionDownloadActions.Register(_handlers);
+            TestRunActions.Register(_handlers);
             HmiActions.Register(_handlers);
         }
 
@@ -137,6 +138,17 @@ namespace Te1000Daemon
             var payload = request.Obj("payload") ?? new Json.JObj();
             int timeout = TimeoutFor(action, payload);
 
+            // The two reads that exist to be safe to call in order to DECIDE must not
+            // queue behind the call you are trying to decide about. When the STA thread
+            // is busy they are answered without it, from the running-object table alone,
+            // and the answer says which half is missing rather than pretending.
+            if (_worker.Busy && DiagnosticActions.Contains(action))
+            {
+                resp["ok"] = true;
+                resp["result"] = OffWorkerDiagnostic(action, payload);
+                return resp;
+            }
+
             var result = _worker.Run(() =>
             {
                 ComSession session = _worker.Session;
@@ -145,8 +157,9 @@ namespace Te1000Daemon
                 Json.JObj data = handler(ctx);
                 if (data == null) data = new Json.JObj();
                 AnnotateProject(session, data);
+                AnnotateSave(ctx, data);
                 return data;
-            }, timeout);
+            }, timeout, action);
 
             if (result.Ok)
             {
@@ -191,6 +204,71 @@ namespace Te1000Daemon
                 data["tsProjectAmbiguous"] = true;
                 data["tsProjectNote"] = "Several TwinCAT projects are open and none was chosen; this is the first one in solution order. Use xae list_projects / select_project, or pass tsProject, to work on another.";
             }
+        }
+
+        // The read-only actions whose whole purpose is to tell you what is going on. They
+        // are answered off the STA thread when it is busy; everything else waits its turn,
+        // because everything else needs the IDE.
+        private static readonly System.Collections.Generic.HashSet<string> DiagnosticActions =
+            new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
+            {
+                "xae_list_instances", "xae_status",
+            };
+
+        // A ROT walk on a thread of its own. No session, so no isCurrent and no
+        // startedByUs -- those live in the busy worker's state and reading them from here
+        // would race a COM call in flight. What is missing is named in the response: a
+        // partial answer that says which part is partial beats a timeout, and beats a full
+        // answer that is quietly a guess.
+        private Json.JObj OffWorkerDiagnostic(string action, Json.JObj payload)
+        {
+            string progId = payload.Truthy("progId") ? payload.Str("progId") : "TcXaeShell.DTE.17.0";
+
+            Json.JObj busy = _worker.BusyReport();
+            var data = new Json.JObj();
+            data["progId"] = progId;
+            data["worker"] = busy;
+            data["servedWithoutSession"] = true;
+            data["note"] = "The STA thread is busy with '" + busy.Str("action") + "' (" +
+                busy.Int("busyForMs", 0) + " ms so far), so this answer comes from the running-object " +
+                "table plus each process's window title -- no call into any IDE, which is the point: " +
+                "asking a busy IDE what it has open would block on the very thing being reported. So " +
+                "isCurrent, startedByUs and the solution PATH are not available here, and neither is " +
+                "anything else status normally reads. The daemon is BUSY, not wedged. A cold " +
+                "open_solution is the usual cause and now gets 10 minutes; if that is what is running, " +
+                "either wait, or start devenv on the solution yourself and xae attach pid:<pid>.";
+
+            Json.JArr arr = new Json.JArr();
+            string error = null;
+            try
+            {
+                foreach (var i in ComSession.ListInstancesStatic(progId))
+                {
+                    var o = new Json.JObj();
+                    o["pid"] = i.Pid;
+                    o["displayName"] = i.DisplayName;
+                    o["windowTitle"] = string.IsNullOrWhiteSpace(i.WindowTitle) ? null : i.WindowTitle;
+                    arr.Add(o);
+                }
+            }
+            catch (Exception ex) { error = ex.GetType().Name + ": " + ex.Message; }
+
+            data["count"] = arr.Count;
+            data["instances"] = arr;
+            if (error != null) data["rotError"] = error;
+            return data;
+        }
+
+        // Say what a save:true actually did. File.SaveAll is a queued shell command, so
+        // "asked to save" and "saved" are two different facts; the one that matters is
+        // whether the IDE reported itself clean before the call returned. Attached here
+        // because save:true is honoured by a dozen handlers that each build their own
+        // result object.
+        private static void AnnotateSave(ActionContext ctx, Json.JObj data)
+        {
+            if (ctx == null || ctx.SaveReport == null || data == null) return;
+            if (data.Has("save")) return;
+            data["save"] = ctx.SaveReport;
         }
 
         // dialog_resolve handler. COM-free; runs on the pipe thread (no STA hop),
@@ -540,8 +618,18 @@ namespace Te1000Daemon
             // Long-running ops keep the legacy infinite wait absent an explicit
             // override; ordinary fast COM calls get the finite safety ceiling.
             if (action != null && LongRunningActions.Contains(action)) return 0;
+            // Opening a solution on a COLD IDE does not fit in the ordinary ceiling:
+            // VS2022 plus the XAE extension starting from scratch runs past 180 s, and
+            // the call then dies for no reason the caller can see. It is not put in
+            // LongRunningActions -- an infinite wait on an IDE that never comes up is
+            // worse -- it just gets a budget that matches the job. On a warm IDE the
+            // same call is effectively instant, so this costs nothing in the normal case.
+            if (string.Equals(action, "xae_open_solution", StringComparison.OrdinalIgnoreCase))
+                return OpenSolutionTimeoutMs;
             return DefaultTimeoutMs;
         }
+
+        private const int OpenSolutionTimeoutMs = 600000; // 10 min
 
         private static string KindString(ErrorKind k)
         {

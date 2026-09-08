@@ -184,7 +184,7 @@ namespace Te1000Daemon
             {
                 throw new BridgeException("Setting ProjectVariantConfig failed: " + ex.Message);
             }
-            if (save) ctx.Dte().ExecuteCommand("File.SaveAll");
+            if (save) ctx.SaveReport = XaeActions.SaveAllAndSettle(ctx.Dte(), XaeActions.SaveSettleMs);
 
             ctx.Cache.Invalidate(null);
 
@@ -210,7 +210,7 @@ namespace Te1000Daemon
 
             dynamic sm = ctx.SysManager();
             sm.CurrentProjectVariant = variant;
-            if (save) ctx.Dte().ExecuteCommand("File.SaveAll");
+            if (save) ctx.SaveReport = XaeActions.SaveAllAndSettle(ctx.Dte(), XaeActions.SaveSettleMs);
 
             ctx.Cache.Invalidate(null);
 
@@ -256,7 +256,7 @@ namespace Te1000Daemon
             dynamic item = ComHelpers.GetTreeItem(sm, treePath);
             item.PvDisable = disable;
             item.Disabled = disable ? 1 : 0;
-            if (save) ctx.Dte().ExecuteCommand("File.SaveAll");
+            if (save) ctx.SaveReport = XaeActions.SaveAllAndSettle(ctx.Dte(), XaeActions.SaveSettleMs);
 
             ctx.Cache.Invalidate(treePath);
 

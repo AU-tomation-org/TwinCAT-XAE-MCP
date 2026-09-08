@@ -165,7 +165,7 @@ namespace Te1000Daemon
 
             if (ctx.Payload.Has("save") && ctx.Payload.Bool("save"))
             {
-                ctx.Dte().ExecuteCommand("File.SaveAll");
+                ctx.SaveReport = XaeActions.SaveAllAndSettle(ctx.Dte(), XaeActions.SaveSettleMs);
             }
             ctx.Cache.Invalidate("TIRT");
 
@@ -221,7 +221,7 @@ namespace Te1000Daemon
 
             if (ctx.Payload.Has("save") && ctx.Payload.Bool("save"))
             {
-                ctx.Dte().ExecuteCommand("File.SaveAll");
+                ctx.SaveReport = XaeActions.SaveAllAndSettle(ctx.Dte(), XaeActions.SaveSettleMs);
             }
             ctx.Cache.Invalidate(treePath);
             return data;
@@ -248,7 +248,7 @@ namespace Te1000Daemon
 
             if (ctx.Payload.Has("save") && ctx.Payload.Bool("save"))
             {
-                ctx.Dte().ExecuteCommand("File.SaveAll");
+                ctx.SaveReport = XaeActions.SaveAllAndSettle(ctx.Dte(), XaeActions.SaveSettleMs);
             }
             ctx.Cache.Invalidate(treePath);
 
@@ -395,7 +395,7 @@ namespace Te1000Daemon
 
             if (ctx.Payload.Has("save") && ctx.Payload.Bool("save"))
             {
-                ctx.Dte().ExecuteCommand("File.SaveAll");
+                ctx.SaveReport = XaeActions.SaveAllAndSettle(ctx.Dte(), XaeActions.SaveSettleMs);
             }
             ctx.Cache.Invalidate("TIRS");
             return data;
@@ -424,7 +424,7 @@ namespace Te1000Daemon
 
             if (ctx.Payload.Has("save") && ctx.Payload.Bool("save"))
             {
-                ctx.Dte().ExecuteCommand("File.SaveAll");
+                ctx.SaveReport = XaeActions.SaveAllAndSettle(ctx.Dte(), XaeActions.SaveSettleMs);
             }
             ctx.Cache.Invalidate(treePath);
             return data;
@@ -512,7 +512,7 @@ namespace Te1000Daemon
 
             if (ctx.Payload.Has("save") && ctx.Payload.Bool("save"))
             {
-                ctx.Dte().ExecuteCommand("File.SaveAll");
+                ctx.SaveReport = XaeActions.SaveAllAndSettle(ctx.Dte(), XaeActions.SaveSettleMs);
             }
             ctx.Cache.Invalidate(treePath);
 

@@ -430,7 +430,13 @@ namespace Te1000Daemon
         {
             if (ctx.Payload.Has("save") && ctx.Payload.Bool("save"))
             {
-                try { ctx.Dte().ExecuteCommand("File.SaveAll"); return true; }
+                // Wait for the save to settle rather than trusting the queued command --
+                // see XaeActions.SaveAllAndSettle for why the two are different facts.
+                try
+                {
+                    ctx.SaveReport = XaeActions.SaveAllAndSettle(ctx.Dte(), XaeActions.SaveSettleMs);
+                    return ctx.SaveReport.Bool("settled");
+                }
                 catch { return false; }
             }
             return false;

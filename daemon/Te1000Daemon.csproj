@@ -43,6 +43,17 @@
     <XaePublicAssemblies Condition="'$(XaePublicAssemblies)' == '' And Exists('C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\PublicAssemblies\envdte80.dll')">C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\PublicAssemblies</XaePublicAssemblies>
     <XaePublicAssemblies Condition="'$(XaePublicAssemblies)' == '' And Exists('C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\PublicAssemblies\envdte80.dll')">C:\Program Files\Microsoft Visual Studio\2022\Professional\Common7\IDE\PublicAssemblies</XaePublicAssemblies>
     <XaePublicAssemblies Condition="'$(XaePublicAssemblies)' == '' And Exists('C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\PublicAssemblies\envdte80.dll')">C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\PublicAssemblies</XaePublicAssemblies>
+    <!--
+      TE2000 (HMI Engineering) automation assembly. Same story as the PIAs above,
+      one product along: TcHmiAutomation.dll is [ComVisible] with a Guid per
+      interface, and the interfaces that do NOT marshal through IDispatch
+      (ITcHmiInternalSymbol, ITcHmiPublishResult, ITcHmiFile) can only be reached
+      by casting the late-bound RCW to the typed interface. Resolved at runtime by
+      VsInterop from the same directories, so nothing is copied local.
+    -->
+    <Te2000Assemblies Condition="'$(Te2000Assemblies)' == '' And Exists('C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\VisualStudio\2022\TcHmiAutomation.dll')">C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\VisualStudio\2022</Te2000Assemblies>
+    <Te2000Assemblies Condition="'$(Te2000Assemblies)' == '' And Exists('C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\VisualStudio\TcXaeShell\TcHmiAutomation.dll')">C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\VisualStudio\TcXaeShell</Te2000Assemblies>
+    <Te2000Assemblies Condition="'$(Te2000Assemblies)' == '' And Exists('C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\bin\TcHmiAutomation.dll')">C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\bin</Te2000Assemblies>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|x64' ">
     <DebugSymbols>true</DebugSymbols>
@@ -104,11 +115,17 @@
       <SpecificVersion>false</SpecificVersion>
       <Private>false</Private>
     </Reference>
+    <Reference Include="TcHmiAutomation">
+      <HintPath>$(Te2000Assemblies)\TcHmiAutomation.dll</HintPath>
+      <SpecificVersion>false</SpecificVersion>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Program.cs" />
     <Compile Include="VsInterop.cs" />
     <Compile Include="HmiInterop.cs" />
+    <Compile Include="HmiTyped.cs" />
     <Compile Include="Json.cs" />
     <Compile Include="Log.cs" />
     <Compile Include="OleMessageFilter.cs" />
@@ -137,6 +154,7 @@
     <Compile Include="Actions\LicenseVariantActions.cs" />
     <Compile Include="Actions\NcActions.cs" />
     <Compile Include="Actions\SessionDownloadActions.cs" />
+    <Compile Include="Actions\TestRunActions.cs" />
     <Compile Include="Actions\HmiActions.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />

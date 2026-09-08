@@ -120,7 +120,7 @@ namespace Te1000Daemon
             if (save)
             {
                 bool saved = false;
-                try { ctx.Dte().ExecuteCommand("File.SaveAll"); saved = true; }
+                try { ctx.SaveReport = XaeActions.SaveAllAndSettle(ctx.Dte(), XaeActions.SaveSettleMs); saved = ctx.SaveReport.Bool("settled"); }
                 catch { saved = false; }
                 data["saved"] = saved;
             }
@@ -235,7 +235,7 @@ namespace Te1000Daemon
             if (save)
             {
                 bool saved = false;
-                try { ctx.Dte().ExecuteCommand("File.SaveAll"); saved = true; }
+                try { ctx.SaveReport = XaeActions.SaveAllAndSettle(ctx.Dte(), XaeActions.SaveSettleMs); saved = ctx.SaveReport.Bool("settled"); }
                 catch { saved = false; }
                 data["saved"] = saved;
             }

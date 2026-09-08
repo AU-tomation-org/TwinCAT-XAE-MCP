@@ -47,6 +47,7 @@ const {
   LICENSE_ACTIVATE_CONFIRMATION,
   IDE_SHUTDOWN_CONFIRMATION,
   HMI_PUBLISH_CONFIRMATION,
+  PLC_TESTS_CONFIRMATION,
 } = require("./toolSchemas.js");
 
 // 64-bit TcXaeShell (DTE.17.0) implies a 64-bit Windows, so the live UIA helper
@@ -248,7 +249,7 @@ function buildServer() {
 server.registerTool(
   "xae",
   toolSchemas.xae,
-  async ({ action, solutionPath, closeExisting, discardChanges, filter, limit, severityFilter, button, remember, save, confirm, pid, attachPid, attachSolution, forceNew, mode, name, path: projectPath, platform }) => {
+  async ({ action, solutionPath, closeExisting, discardChanges, filter, limit, severityFilter, button, remember, save, confirm, pid, attachPid, attachSolution, forceNew, mode, name, path: projectPath, platform, pane, tail }) => {
     const payload = { mode, attachPid, attachSolution, forceNew };
     if (action === "attach") {
       if (!pid && !solutionPath) throw new Error("attach requires pid or solutionPath (use list_instances to see what is running).");
@@ -274,6 +275,7 @@ server.registerTool(
     }
     if (action === "list_commands") Object.assign(payload, { filter, limit });
     if (action === "error_list") Object.assign(payload, { limit, severityFilter });
+    if (action === "output") Object.assign(payload, { pane, tail });
     if (action === "dialog_resolve") {
       need({ button }, ["button"], action);
       Object.assign(payload, { button, remember: remember === true });
@@ -548,7 +550,7 @@ server.registerTool(
         return textResult(await bridgeCall("plc_project_plcopen_import", { treePath: p.treePath, file: p.file, options: p.options, selection: p.selection, folderStructure: p.folderStructure, save: p.save === true }));
       case "save_as_library":
         need(p, ["file"], p.action);
-        return textResult(await bridgeCall("plc_project_save_as_library", { treePath: p.treePath, file: p.file, install: p.install === true }));
+        return textResult(await bridgeCall("plc_project_save_as_library", { treePath: p.treePath, file: p.file, install: p.install === true, overwrite: p.overwrite === true }));
     }
   },
 );
@@ -1116,6 +1118,66 @@ server.registerTool(
       case "unmap":
         need(p, ["mapName"], p.action);
         return textResult(await bridgeCall("hmi_symbol_unmap", { ...base, mapName: p.mapName, domain: p.domain, removeHistorizedData: p.removeHistorizedData === true, save: p.save }));
+      case "internal_add":
+        need(p, ["name", "type"], p.action);
+        return textResult(await bridgeCall("hmi_symbol_internal_add", { ...base, name: p.name, type: p.type, value: p.value, persist: p.persist === true, readOnly: p.readOnly === true, save: p.save }));
+      case "internal_remove":
+        need(p, ["name"], p.action);
+        return textResult(await bridgeCall("hmi_symbol_internal_remove", { ...base, name: p.name, save: p.save }));
+    }
+  },
+);
+
+server.registerTool(
+  "hmi_file",
+  toolSchemas.hmi_file,
+  async (p) => {
+    const base = { ...hmiBase(p), path: p.path };
+    switch (p.action) {
+      case "identifiers":
+        need(p, ["path"], p.action);
+        return textResult(await bridgeCall("hmi_file_identifiers", { ...base, parent: p.parent }));
+      case "source":
+        need(p, ["path"], p.action);
+        return textResult(await bridgeCall("hmi_file_source", base));
+      case "set_source":
+        need(p, ["path", "source"], p.action);
+        return textResult(await bridgeCall("hmi_file_set_source", { ...base, source: p.source, save: p.save }));
+      case "control":
+        need(p, ["path", "identifier"], p.action);
+        return textResult(await bridgeCall("hmi_file_control", { ...base, identifier: p.identifier }));
+      case "add_control":
+        need(p, ["path", "identifier", "type"], p.action);
+        return textResult(await bridgeCall("hmi_file_add_control", { ...base, identifier: p.identifier, type: p.type, parent: p.parent, before: p.before, after: p.after, attributes: p.attributes, save: p.save }));
+      case "change_attributes":
+        need(p, ["path", "identifier", "attributes"], p.action);
+        return textResult(await bridgeCall("hmi_file_change_attributes", { ...base, identifier: p.identifier, attributes: p.attributes, save: p.save }));
+      case "remove_control":
+        need(p, ["path", "identifier"], p.action);
+        return textResult(await bridgeCall("hmi_file_remove_control", { ...base, identifier: p.identifier, save: p.save }));
+      case "beautify":
+        need(p, ["path"], p.action);
+        return textResult(await bridgeCall("hmi_file_beautify", { ...base, save: p.save }));
+    }
+  },
+);
+
+server.registerTool(
+  "plc_tests",
+  toolSchemas.plc_tests,
+  async (p) => {
+    switch (p.action) {
+      case "results":
+        return textResult(await bridgeCall("plc_test_results", { tsProject: p.tsProject, bootDir: p.bootDir }));
+      case "run":
+        if (p.confirm !== PLC_TESTS_CONFIRMATION) {
+          throw new Error(`Blocked. Running the tests ACTIVATES the configuration and RESTARTS the runtime on the target, which replaces whatever it was running. Re-run with confirm="${PLC_TESTS_CONFIRMATION}".`);
+        }
+        return textResult(await bridgeCall("plc_run_tests", {
+          confirm: p.confirm, tsProject: p.tsProject, treePath: p.treePath, bootDir: p.bootDir,
+          build: p.build !== false, buildTimeoutMs: p.buildTimeoutMs, waitMs: p.waitMs,
+          keepAutostart: p.keepAutostart === true,
+        }));
     }
   },
 );
@@ -1160,7 +1222,7 @@ server.registerTool(
         if (p.confirm !== HMI_PUBLISH_CONFIRMATION) {
           throw new Error(`Blocked. publish uploads this project to a TcHmi server instance and REPLACES whatever it was serving. Re-run with confirm="${HMI_PUBLISH_CONFIRMATION}" to proceed.`);
         }
-        return textResult(await bridgeCall("hmi_publish", { ...base, profile: p.profile, updateUi: p.updateUi === true, force: p.force === true }));
+        return textResult(await bridgeCall("hmi_publish", { ...base, profile: p.profile, updateUi: p.updateUi === true, force: p.force === true, waitMs: p.waitMs }));
       }
     }
   },

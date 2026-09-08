@@ -66,30 +66,63 @@ namespace Te1000Daemon
                 reader = new StreamReader(server, new UTF8Encoding(false), false, 1 << 16, leaveOpen: true);
                 writer = new StreamWriter(server, new UTF8Encoding(false), 1 << 16, leaveOpen: true) { AutoFlush = false };
 
+                // Each request line is handled on a thread of its own.
+                //
+                // The client keeps ONE connection and correlates replies by id, so
+                // handling them in order here made the connection itself serial: a call
+                // that took three minutes held up every later one, including the
+                // COM-free diagnostics and the two reads that exist to be safe to call
+                // while deciding. Then the server looked wedged rather than busy.
+                // Nothing about COM changes -- the STA worker still serializes every
+                // call that needs the IDE -- but a reply that IS ready now gets out now.
+                //
+                // Replies may therefore come back out of order; the id is what pairs them
+                // up, which is what it was always for. The writer is not thread-safe, so
+                // one lock guards a whole line plus its flush: interleaved bytes would
+                // break the framing for everything after them.
+                object writeGate = new object();
+                StreamWriter w = writer;
                 string line;
                 while (server.IsConnected && (line = reader.ReadLine()) != null)
                 {
                     if (line.Length == 0) continue;
-                    string responseLine;
-                    try
+                    string requestLine = line;
+                    var t = new Thread(delegate()
                     {
-                        var request = Json.ParseObject(line);
-                        var resp = _dispatcher.Handle(request);
-                        responseLine = Json.Write(resp);
-                    }
-                    catch (Exception ex)
-                    {
-                        // Malformed request or unexpected dispatcher failure.
-                        var resp = new Json.JObj();
-                        resp["ok"] = false;
-                        resp["error"] = "Daemon request handling failed: " + ex.Message;
-                        resp["errorKind"] = "com_error";
-                        responseLine = Json.Write(resp);
-                    }
-                    writer.Write(responseLine);
-                    writer.Write('\n');
-                    writer.Flush();
+                        string responseLine;
+                        try
+                        {
+                            var request = Json.ParseObject(requestLine);
+                            var resp = _dispatcher.Handle(request);
+                            responseLine = Json.Write(resp);
+                        }
+                        catch (Exception ex)
+                        {
+                            // Malformed request or unexpected dispatcher failure.
+                            var resp = new Json.JObj();
+                            resp["ok"] = false;
+                            resp["error"] = "Daemon request handling failed: " + ex.Message;
+                            resp["errorKind"] = "com_error";
+                            responseLine = Json.Write(resp);
+                        }
+                        try
+                        {
+                            lock (writeGate)
+                            {
+                                w.Write(responseLine);
+                                w.Write('\n');
+                                w.Flush();
+                            }
+                        }
+                        catch (Exception ex) { Log.Error("PipeServer.Write", ex); }
+                    }) { IsBackground = true, Name = "te1000-pipe-req" };
+                    t.Start();
                 }
+
+                // The reader stopped, but replies for requests already accepted may still
+                // be on their way to the writer. Give them a moment before the finally
+                // block disposes the stream underneath them.
+                Thread.Sleep(250);
             }
             catch (Exception ex)
             {

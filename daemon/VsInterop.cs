@@ -36,12 +36,22 @@ namespace Te1000Daemon
                                        @"C:\Program Files (x86)\Microsoft Visual Studio\2022" })
                 foreach (var ed in new[] { "Enterprise", "Professional", "Community", "BuildTools" })
                     roots.Add(Path.Combine(pf, ed, @"Common7\IDE\PublicAssemblies"));
+
+            // TE2000's own automation assembly, for the HMI interfaces that do not
+            // marshal through IDispatch (see HmiTyped). One directory per shell plus the
+            // MSBuild/bin copies; they are the same assembly, so the first hit is fine.
+            var te2000 = Environment.GetEnvironmentVariable("TE2000_ASSEMBLY_DIR");
+            if (!string.IsNullOrWhiteSpace(te2000)) roots.Add(te2000);
+            const string te2000Root = @"C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering";
+            foreach (var sub in new[] { @"VisualStudio\2022", @"VisualStudio\2026", @"VisualStudio\2019",
+                                        @"VisualStudio\TcXaeShell", "MSBuild", "bin" })
+                roots.Add(Path.Combine(te2000Root, sub));
             return roots.ToArray();
         }
 
         private static readonly string[] Wanted =
         {
-            "EnvDTE", "EnvDTE80", "Microsoft.VisualStudio.Interop",
+            "EnvDTE", "EnvDTE80", "Microsoft.VisualStudio.Interop", "TcHmiAutomation",
         };
 
         // Idempotent; safe to call from any thread before the first typed-DTE use.

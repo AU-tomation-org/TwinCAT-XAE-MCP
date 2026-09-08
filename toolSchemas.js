@@ -50,6 +50,7 @@ const MEASUREMENT_RECORD_CONFIRMATION = "ALLOW_MEASUREMENT_RECORD";
 const LICENSE_ACTIVATE_CONFIRMATION = "ALLOW_LICENSE_ACTIVATE";
 const IDE_SHUTDOWN_CONFIRMATION = "ALLOW_XAE_SHUTDOWN";
 const HMI_PUBLISH_CONFIRMATION = "ALLOW_HMI_PUBLISH";
+const PLC_TESTS_CONFIRMATION = "ALLOW_PLC_TESTS";
 
 const CONFIRMATIONS = {
   ACTIVATE_CONFIRMATION,
@@ -66,6 +67,7 @@ const CONFIRMATIONS = {
   LICENSE_ACTIVATE_CONFIRMATION,
   IDE_SHUTDOWN_CONFIRMATION,
   HMI_PUBLISH_CONFIRMATION,
+  PLC_TESTS_CONFIRMATION,
 };
 
 // XAE single-tool action name -> daemon action name (used by the xae handler).
@@ -87,6 +89,7 @@ const XAE_ACTIONS = {
   select_project: "xae_select_project",
   list_configurations: "xae_list_configurations",
   set_configuration: "xae_set_configuration",
+  output: "xae_get_output",
 };
 
 // Tools that reach a TwinCAT project's system manager, and therefore take
@@ -98,13 +101,14 @@ const PROJECT_SCOPED_TOOLS = [
   "nc", "tc_task", "plc_download", "plc_project", "plc_pou", "plc_library",
   "tc_route", "tc_settings", "tc_fieldbus", "tc_module", "tc_cpp", "tc_measurement",
   "tc_license", "tc_variant", "twincat_activate_configuration", "twincat_restart_runtime",
+  "plc_tests",
 ];
 
 // --- The tool schemas, keyed by tool name. Each entry is the EXACT config object
 // (description + zod inputSchema raw shape) that registerTool consumes. ----------
 const toolSchemas = {
   xae: {
-    description: "XAE shell: status, open_solution (solutionPath; closeExisting:true reopens, discardChanges:true closes the current solution WITHOUT saving before reopening), save_all, active_document, selected_items, error_list (default 50, in Error List order; pass limit to widen, severityFilter:'errors'|'warnings' to filter before the cap — count still reports the true matching total), clear_error_list, list_commands (filter regex, limit), dialog_probe (read-only: is a modal dialog blocking XAE right now? returns its title/text/buttons; never clicks anything), dialog_resolve (button, remember) — click a chosen button on the live modal dialog and optionally remember it in the allowlist; pair with dialog_probe. Destructive prompts (activate/restart/download/safety) are refused for auto-remember (the click still happens once). shutdown_ide (save? default true, confirm=\"ALLOW_XAE_SHUTDOWN\") — close the IDE this session drives: settles dirty documents (saved, or discarded with save:false), closes the solution, then Quit(). Attaches only to an already-running IDE, never starts one. Killing the daemon without this leaves devenv orphaned, holding the solution open. list_instances \u2014 every running IDE for this progId with pid, the solution it has open, and which one this session is on; read-only, attaches to nothing and starts nothing. attach (pid | solutionPath) \u2014 bind this session to ONE named instance; a miss is an error listing what IS running, never a fallback to another IDE. The binding sticks for later calls, including tools that expose no mode of their own. Use list_instances then attach instead of relying on mode:\"active\", which means \"whichever instance the ROT happens to list first with a solution open\". list_projects — the TwinCAT projects (.tsproj) of the open solution with name, path, TargetNetId and PLC-project count, and which one is bound; read-only. select_project (name | path) — bind the session to ONE of them, the same contract as attach one level down: a miss lists what IS there, and the binding sticks for later calls. It matters because a solution holds one system manager PER project (tree, target NetId, boot flags, activation): with several present and none chosen, reads answer from the first in solution order and are flagged tsProjectAmbiguous, while the actions that change the target (activate, restart, boot flags, download, set_netid) refuse until one is named. Any tool may also name it per call with tsProject. list_configurations — the solution configurations and which is active; set_configuration (name, platform?) activates one, e.g. \"Release|TwinCAT OS (x64)\" — xae_build builds the ACTIVE configuration, so a solution left on another platform yields a verdict that differs from CI's for no visible reason.",
+    description: "XAE shell: status, open_solution (solutionPath; closeExisting:true reopens, discardChanges:true closes the current solution WITHOUT saving before reopening), save_all, active_document, selected_items, error_list (default 50, in Error List order; pass limit to widen, severityFilter:'errors'|'warnings' to filter before the cap — count still reports the true matching total), clear_error_list, list_commands (filter regex, limit), dialog_probe (read-only: is a modal dialog blocking XAE right now? returns its title/text/buttons; never clicks anything), dialog_resolve (button, remember) — click a chosen button on the live modal dialog and optionally remember it in the allowlist; pair with dialog_probe. Destructive prompts (activate/restart/download/safety) are refused for auto-remember (the click still happens once). shutdown_ide (save? default true, confirm=\"ALLOW_XAE_SHUTDOWN\") — close the IDE this session drives: settles dirty documents (saved, or discarded with save:false), closes the solution, then Quit(). Attaches only to an already-running IDE, never starts one. Killing the daemon without this leaves devenv orphaned, holding the solution open. list_instances \u2014 every running IDE for this progId with pid, the solution it has open, and which one this session is on; read-only, attaches to nothing and starts nothing. attach (pid | solutionPath) \u2014 bind this session to ONE named instance; a miss is an error listing what IS running, never a fallback to another IDE. The binding sticks for later calls, including tools that expose no mode of their own. Use list_instances then attach instead of relying on mode:\"active\", which means \"whichever instance the ROT happens to list first with a solution open\". list_projects — the TwinCAT projects (.tsproj) of the open solution with name, path, TargetNetId and PLC-project count, and which one is bound; read-only. select_project (name | path) — bind the session to ONE of them, the same contract as attach one level down: a miss lists what IS there, and the binding sticks for later calls. It matters because a solution holds one system manager PER project (tree, target NetId, boot flags, activation): with several present and none chosen, reads answer from the first in solution order and are flagged tsProjectAmbiguous, while the actions that change the target (activate, restart, boot flags, download, set_netid) refuse until one is named. Any tool may also name it per call with tsProject. list_configurations — the solution configurations and which is active; set_configuration (name, platform?) activates one, e.g. \"Release|TwinCAT OS (x64)\" — xae_build builds the ACTIVE configuration, so a solution left on another platform yields a verdict that differs from CI's for no visible reason. output (pane? default \"Build\", tail? default 200) — the last N lines of an Output window pane, and the pane names. This is where a build failure explains itself: a solution build that breaks inside one PLC project can leave a SINGLE Error List row (\"'TwinCAT XAE': Project 'X' build for platform 'Y' failed.\") with no file, no code and no compiler row, and the reason is only in this window. A pane that is not there is an error naming the ones that are.",
     inputSchema: {
       action: z.enum(Object.keys(XAE_ACTIONS)),
       solutionPath: z.string().optional(),
@@ -124,6 +128,8 @@ const toolSchemas = {
       attachSolution: z.string().optional().describe("any action: use the IDE that has this solution open; like attach, the session stays bound to it afterwards"),
       forceNew: z.boolean().optional().describe("any action: start a brand new IDE for this call, whatever is already running (mode:\"create\" alone reuses the one this session started)"),
       confirm: z.string().optional().describe("shutdown_ide: must equal ALLOW_XAE_SHUTDOWN to close the IDE"),
+      pane: z.string().optional().describe("output: which Output window pane, default \"Build\". Matched exactly first, then case-insensitively as a substring, because pane names are localized"),
+      tail: z.number().int().positive().max(20000).optional().describe("output: how many trailing lines to return, default 200"),
       mode: z.enum(["active", "activeOrCreate", "create"]).optional().describe("DTE attach mode; default active (open_solution: activeOrCreate)"),
     },
   },
@@ -309,7 +315,7 @@ const toolSchemas = {
     description:
       'PLC (IEC) project lifecycle on the open solution. Tree paths use ^ separators; the PLC ROOT node is TIPC^<name>, the nested project INSTANCE node is TIPC^<name>^<name> Project. NODE MATTERS: ITcPlcProject (boot flags / generate_boot) is on the ROOT; ITcPlcIECProject* (plcopen_export/import / save_as_library) is on the INSTANCE node. ' +
       'Actions: create_from_template (name, template, before?, save?) — new PLC project from a stock template; open (name, file=.plcproj/.tpzip, subType 0 copy/1 move/2 use-in-place, before?, save?) — import an existing project; info (treePath? default first under TIPC) — read identity (nestedProjectName/instanceName/childCount); set_boot_flags (treePath? = ROOT, autostart?, tmcFileCopy?) — config-only boot flags; ' +
-      'plcopen_export (file, treePath? = INSTANCE, selection?) — write PLCopen XML; plcopen_import (file, treePath? = INSTANCE, options 0 NONE/1 RENAME/2 REPLACE/3 SKIP, selection?, folderStructure? default true, save?) — import PLCopen XML; save_as_library (file, treePath? = INSTANCE, install? default false — install:true mutates the local library repository) — save project as .library. ' +
+      'plcopen_export (file, treePath? = INSTANCE, selection?) — write PLCopen XML; plcopen_import (file, treePath? = INSTANCE, options 0 NONE/1 RENAME/2 REPLACE/3 SKIP, selection?, folderStructure? default true, save?) — import PLCopen XML; save_as_library (file, treePath? = INSTANCE, install? default false — install:true mutates the local library repository, overwrite? default false) — save project as .library. SaveAsLibrary never overwrites: onto an existing target it fails, so re-exporting needs overwrite:true, which deletes the target first and reports replacedExisting. The response also carries fileWritten, read back from disk, because a call that returns without throwing is not by itself proof a file arrived. ' +
       'GUARDED (live runtime/target writes), require confirm="' + PLC_DOWNLOAD_CONFIRMATION + '" and default to no-op: generate_boot_project (treePath? = ROOT, autostart? default true) — generates the boot project to the target boot dir (restart runtime to load); online (command login/logout/start/stop/reset_cold/reset_origin, treePath? — changes live online/runtime state; the ConsumeXml envelope is UNVERIFIED on this build and surfaces GetLastXmlError verbatim, reset_* need a prior login, build>=4010). Safety projects are deliberately out of scope.',
     inputSchema: {
       action: z.enum([
@@ -330,6 +336,7 @@ const toolSchemas = {
       selection: z.string().optional(),
       folderStructure: z.boolean().optional(),
       install: z.boolean().optional(),
+      overwrite: z.boolean().optional().describe("save_as_library: delete an existing target .library before exporting; without it an existing file is refused by name"),
       save: z.boolean().optional(),
       confirm: z.string().optional(),
     },
@@ -749,13 +756,19 @@ const toolSchemas = {
       "Symbols of a TwinCAT HMI project, through the project's server interface. Mapped symbols are an EXPLICIT list (Server\\TcHmiSrv\\TcHmiSrv.Config.default.json), not a live discovery: a binding onto a symbol nobody mapped is null at run time and silent at build time, which is why listing them is worth a verb. Actions: " +
       "list (read-only; refresh?, filter? substring on the mapped name, maxResults? default 500) — mapped name, domain, the tchmi schema $ref of its type, ReadOnly and Hidden; " +
       "map (mapName, internalName, domain? default ADS, subSymbolName?) — MapSymbol; the 4-argument form with subSymbolName needs ITcHmiServer3 and fails clearly on an older server rather than dropping the sub-symbol; " +
-      "unmap (mapName, domain? default ADS, removeHistorizedData?). " +
-      "NOT here, and measured rather than assumed: creating an INTERNAL symbol. ITcHmiInternalSymbol does not marshal through IDispatch (all four call routes fail, the 5-argument overload included), unlike ITcHmiMappedSymbol which reads fine. Internal symbols need the IDE's symbol tool until this daemon binds TcHmiAutomation.dll early.",
+      "unmap (mapName, domain? default ADS, removeHistorizedData?); " +
+      "internal_add (name, type — a tchmi schema ref such as \"tchmi:general#/definitions/Number\" —, value?, persist?, readOnly?) and internal_remove (name) — INTERNAL symbols, which needed the IDE's symbol tool until the daemon began binding TcHmiAutomation.dll early: ITcHmiInternalSymbol does not marshal through IDispatch (all four late-bound routes fail, the 5-argument overload included) and is reached by interface instead. " +
+      "Both read the project back and report confirmed from that, not from the call: RemoveInternalSymbol answers FALSE on a symbol it has just removed, so its return value is a fact about the call and never the verdict.",
     inputSchema: {
-      action: z.enum(["list", "map", "unmap"]),
+      action: z.enum(["list", "map", "unmap", "internal_add", "internal_remove"]),
       hmiProject: z.string().optional(),
       mapName: z.string().optional(),
       internalName: z.string().optional(),
+      name: z.string().optional().describe("internal_add / internal_remove: the internal symbol's name"),
+      type: z.string().optional().describe("internal_add: the tchmi schema type ref, e.g. tchmi:general#/definitions/Number"),
+      value: z.any().optional().describe("internal_add: the default value"),
+      persist: z.boolean().optional().describe("internal_add: persist the value across restarts"),
+      readOnly: z.boolean().optional().describe("internal_add: expose the symbol read-only"),
       subSymbolName: z.string().optional(),
       domain: z.string().optional().describe("default ADS"),
       removeHistorizedData: z.boolean().optional(),
@@ -765,6 +778,52 @@ const toolSchemas = {
       save: z.boolean().optional(),
       mode: z.enum(["active", "activeOrCreate", "create"]).optional(),
       timeoutMs: z.number().int().optional(),
+    },
+  },
+
+  hmi_file: {
+    description:
+      "Controls INSIDE a TwinCAT HMI file — a .view, .content or .usercontrol — through ITcHmiFile, so widgets and their attributes are placed by the tool that owns the format instead of by editing HTML as text. path is project-RELATIVE with the extension (e.g. \"Desktop.view\", \"UserControls\\\\Foo.usercontrol\"); an absolute path is refused. The file is located by walking the project's own ProjectItems, NOT Solution.FindProjectItem, which answers null on an HMI project even for a file the .hmiproj plainly declares. " +
+      "Actions: identifiers (parent? — omit for the whole file, give an id for its children) — every control id, read-only; source / set_source (source) — the file's markup, for the cases the control verbs cannot reach; " +
+      "add_control (identifier, type, and exactly ONE of parent (append inside it) / before / after (next to that sibling), attributes? [{name, value}]) — AddControl and its Before/After siblings. Its return value is reported as controlReturned and is NOT the verdict: it comes back null even when the control was added, so added/confirmed are read back from the file; " +
+      "remove_control (identifier) — refuses an id the file does not list rather than reporting a cheerful false; beautify — re-indent; control (identifier) — a control's attributes. " +
+      "MEASURED LIMIT: control and change_attributes do not work on this TE2000 build. ITcHmiFile.GetControl answers null for EVERY identifier, freshly added ones included, with the file open and IsOpenAndReady true, and ITcHmiProject.GetControlInstance wants a DOM node, not an id — so reading or changing the attributes of an EXISTING control is out of reach; both verbs say so, with the routes they tried. What works: add_control (attributes are set at creation), remove_control, source / set_source. " +
+      "And the standing warning: putting a binding attribute in the file is not a binding that delivers. A misspelled one builds green with an empty Error List; only the running HMI can answer that.",
+    inputSchema: {
+      action: z.enum(["identifiers", "source", "set_source", "control", "add_control", "change_attributes", "remove_control", "beautify"]),
+      hmiProject: z.string().optional(),
+      path: z.string().describe("project-relative path WITH extension, e.g. Desktop.view"),
+      identifier: z.string().optional().describe("the control's id"),
+      parent: z.string().optional().describe("identifiers: list this control's children. add_control: append inside this control"),
+      before: z.string().optional().describe("add_control: insert before this sibling"),
+      after: z.string().optional().describe("add_control: insert after this sibling"),
+      type: z.string().optional().describe("add_control: the control type, e.g. TcHmi.Controls.Beckhoff.TcHmiTextblock"),
+      attributes: z.array(z.object({ name: z.string(), value: z.string().optional() })).optional().describe("[{name, value}]; the attribute objects are built by the project's own factory, so they are described here rather than passed in"),
+      source: z.string().optional().describe("set_source: the whole markup"),
+      save: z.boolean().optional(),
+      mode: z.enum(["active", "activeOrCreate", "create"]).optional(),
+      timeoutMs: z.number().int().optional(),
+    },
+  },
+
+  plc_tests: {
+    description:
+      "Run the TcUnit suite on the target and return the numbers — the verdict this server could not give, which is why the test result still had to come from CI. " +
+      "run is GUARDED (confirm=\"" + PLC_TESTS_CONFIRMATION + "\") because it ACTIVATES the configuration and RESTARTS the runtime: that REPLACES whatever the target was running, and putting back what was there is the caller's job. The result says so every time. " +
+      "The sequence: set the PLC project's boot autostart flag (and restore it afterwards unless keepAutostart), save + build (stopping on a non-zero lastBuildInfo — a suite that did not compile cannot be run), DELETE the previous tcunit_xunit_testresults.xml, activate, restart, then wait for the file to reappear and settle before parsing. The delete is the step that makes the verdict real: without it a run that produced nothing reads exactly like a run that passed. " +
+      "WHICH Boot directory is matched to the target NetId by reading each user-mode runtime's TcRegistry.xml (the NetId is in there as binary hex), never picked by convention: reading the wrong one reports another target's numbers as these. No match is an error listing what was found; bootDir overrides. " +
+      "The totals are SUMMED from the <testsuite> elements. The root <testsuites tests=\"N\"> attribute does not count the failures — a run with 3 red wrote tests=\"65\" against a suite sum of 68 — so it is reported separately and a disagreement is flagged. The same tally also arrives in the Error List as PlcTask rows at severity High (\"Successful tests: N\" / \"Failed tests: N\"), which the PLC compiler never uses; those are returned as an independent cross-check. " +
+      "results (read-only) parses whatever file is on disk and warns that its age says nothing about the code you are asking about — check lastWriteUtc. " +
+      "With several PLC projects under TIPC and no treePath this refuses: the boot flag has to go on the one that holds the suite.",
+    inputSchema: {
+      action: z.enum(["run", "results"]),
+      confirm: z.string().optional(),
+      treePath: z.string().optional().describe("run: the PLC ROOT node (TIPC^<name>) that holds the suite; required when there is more than one"),
+      bootDir: z.string().optional().describe("override the runtime Boot directory instead of matching it to the target NetId"),
+      build: z.boolean().optional().describe("run: build before activating (default true)"),
+      buildTimeoutMs: z.number().int().positive().optional(),
+      waitMs: z.number().int().positive().optional().describe("run: how long to wait for the results file (default 600000)"),
+      keepAutostart: z.boolean().optional().describe("run: leave the boot autostart flag set instead of restoring what it was"),
     },
   },
 
@@ -802,7 +861,7 @@ const toolSchemas = {
     description:
       `Publish a TwinCAT HMI project to a TcHmi server. GUARDED: publish requires confirm="${HMI_PUBLISH_CONFIRMATION}" — one server instance hosts ONE project, so publishing REPLACES whatever that instance was serving. Actions: ` +
       "profiles (read-only) — the publish profiles from Properties\\tchmipublish.config.json, each with its destination and whether it will actually push the server-extension configuration; " +
-      "publish (profile, confirm, updateUi?, force?) — pre-flight then Publish. The pre-flight is the point: with serverExtensions populated (which is what the IDE's publish dialog writes) a publish SUCCEEDS, uploads the project, and silently does NOT push the server extension configuration — the ADS runtimes block stays at the server default and every symbol is null. That is refused here unless force:true; the cure is \"serverExtensions\": [] in the profile. It has to be caught BEFORE the call because ITcHmiPublishResult carries only Result / IsCompleted / SubmissionId (measured by reflection) — there is no per-extension verdict, so a green publish means the upload ran, not that the configuration landed. Confirm on the server storage that the RUNTIMES::*::NETID rows are no older than PROJECTNAME; " +
+      "publish (profile, confirm, updateUi?, force?, waitMs?) — pre-flight, Publish, then WAIT for it. The pre-flight is the point: with serverExtensions populated (which is what the IDE's publish dialog writes) a publish SUCCEEDS, uploads the project, and silently does NOT push the server extension configuration — the ADS runtimes block stays at the server default and every symbol is null. That is refused here unless force:true; the cure is \"serverExtensions\": [] in the profile. Publish is ASYNCHRONOUS, so the call returns while the upload is still running and the result read straight after is empty; this waits for IsPublishRunning to go false (waitMs, default 600000) and reports waitedMs and completed. Two things measured on the first real publish: the optional progressCallback must be OMITTED, not passed as null — a null reaches IDispatch as VT_EMPTY and fails the whole call with \"Specified OLE variant is invalid\" — and GetPublishResult answers a plain BOOLEAN on this TE2000 build, not an ITcHmiPublishResult, so there is no Result code or SubmissionId to report. A green publish means the upload ran, NOT that the configuration landed: confirm that on the server storage, where the RUNTIMES::*::NETID rows must be no older than PROJECTNAME. Publishing also rewrites the profile file itself (the port becomes a number, socketTimeout appears) and touches engineering.html — expect both at git status; " +
       "result (read-only) — IsPublishRunning plus the last GetPublishResult.",
     inputSchema: {
       action: z.enum(["profiles", "publish", "result"]),
@@ -810,6 +869,7 @@ const toolSchemas = {
       profile: z.string().optional(),
       updateUi: z.boolean().optional(),
       force: z.boolean().optional().describe("publish anyway when the profile would skip the server-extension config"),
+      waitMs: z.number().int().min(0).optional().describe("publish: how long to wait for the asynchronous publish to finish before reporting a partial result (default 600000)"),
       confirm: z.string().optional(),
       mode: z.enum(["active", "activeOrCreate", "create"]).optional(),
       timeoutMs: z.number().int().optional(),

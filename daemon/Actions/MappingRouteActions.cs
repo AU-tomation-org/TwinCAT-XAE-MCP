@@ -106,7 +106,7 @@ namespace Te1000Daemon
                 throw new BridgeException("ConsumeMappingInfo failed: " + ex.Message + " (" + ComHelpers.ErrorCode(ex) + ")");
             }
 
-            if (save) dte.ExecuteCommand("File.SaveAll");
+            if (save) ctx.SaveReport = XaeActions.SaveAllAndSettle(dte, XaeActions.SaveSettleMs);
 
             ctx.Cache.Invalidate(null);
 
@@ -131,7 +131,7 @@ namespace Te1000Daemon
                 throw new BridgeException("ClearMappingInfo failed: " + ex.Message + " (" + ComHelpers.ErrorCode(ex) + ")");
             }
 
-            if (save) dte.ExecuteCommand("File.SaveAll");
+            if (save) ctx.SaveReport = XaeActions.SaveAllAndSettle(dte, XaeActions.SaveSettleMs);
 
             ctx.Cache.Invalidate(null);
 

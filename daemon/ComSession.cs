@@ -454,6 +454,64 @@ namespace Te1000Daemon
             return result;
         }
 
+        // What the running-object table says, WITHOUT calling into any IDE.
+        //
+        // The ordinary walk asks each instance for dte.Solution.FullName -- a COM call
+        // into that IDE, which is the one thing that must not happen here: this exists to
+        // answer while an IDE is busy, and a call into a busy apartment would block on the
+        // very thing it is meant to report on. So the moniker enumeration gives the pids
+        // (they are in the display name), and what each one has open comes from the OS --
+        // the process's main window title -- which cannot block on COM at all.
+        //
+        // The title is not the solution path; it is what the IDE is showing. Reported as
+        // the title it is, so nobody mistakes it for a path.
+        public sealed class StaticInstanceInfo
+        {
+            public int Pid;
+            public string DisplayName;
+            public string WindowTitle;
+        }
+
+        public static List<StaticInstanceInfo> ListInstancesStatic(string progId)
+        {
+            if (string.IsNullOrWhiteSpace(progId)) progId = "TcXaeShell.DTE.17.0";
+            var result = new List<StaticInstanceInfo>();
+
+            IRunningObjectTable rot;
+            if (GetRunningObjectTable(0, out rot) != 0 || rot == null) return result;
+            IBindCtx bindCtx;
+            if (CreateBindCtx(0, out bindCtx) != 0 || bindCtx == null) return result;
+            IEnumMoniker enumMoniker;
+            rot.EnumRunning(out enumMoniker);
+            if (enumMoniker == null) return result;
+
+            var monikers = new IMoniker[1];
+            while (enumMoniker.Next(1, monikers, IntPtr.Zero) == 0)
+            {
+                string displayName = "";
+                try { monikers[0].GetDisplayName(bindCtx, null, out displayName); }
+                catch { displayName = ""; }
+                if (string.IsNullOrWhiteSpace(displayName) ||
+                    displayName.IndexOf(progId, StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+
+                var info = new StaticInstanceInfo();
+                info.DisplayName = displayName;
+                info.Pid = PidFromMoniker(displayName);
+                if (info.Pid > 0)
+                {
+                    try
+                    {
+                        System.Diagnostics.Process p = System.Diagnostics.Process.GetProcessById(info.Pid);
+                        info.WindowTitle = p.MainWindowTitle;
+                    }
+                    catch { }
+                }
+                result.Add(info);
+            }
+            return result;
+        }
+
         [DllImport("ole32.dll")] private static extern int GetRunningObjectTable(int reserved, out IRunningObjectTable prot);
         [DllImport("ole32.dll")] private static extern int CreateBindCtx(int reserved, out IBindCtx ppbc);
 

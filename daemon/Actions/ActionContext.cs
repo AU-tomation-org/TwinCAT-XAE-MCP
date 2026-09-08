@@ -15,6 +15,13 @@ namespace Te1000Daemon
         public readonly string ProgId;
         public readonly string Mode;
 
+        // What a save:true actually did, filled in by the handlers that honour it. A save
+        // that did not settle has to reach the caller whatever verb asked for it, and
+        // save:true lives on a dozen handlers that each build their own result object --
+        // so it is attached to the response by the dispatcher instead of being threaded
+        // through all of them.
+        public Json.JObj SaveReport;
+
         public ActionContext(string action, Json.JObj payload, ComSession session, TreeCache cache, EditWatcher edits)
         {
             Action = action;
