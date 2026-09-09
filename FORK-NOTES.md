@@ -726,6 +726,58 @@ at `vsBuildErrorLevelHigh` said `Successful tests: 238` / `Failed tests: 0`, mat
 `plc_tests results` parses whatever file is on disk and warns that its age says nothing
 about the code you are asking about.
 
+### 19. `plc_pou move` destroyed what it moved
+
+`move` is export / delete / import: `ExportChild` writes the object to a temporary `.zip`,
+the original is deleted so the global namespace is free, and `ImportChild` puts it back
+under the new parent. The archive is where it went wrong. **`ExportChild` writes the
+object's whole project path into the entry name** —
+
+```
+POUs\ContactorDT\Interfaces\IMotorSupplyDT.TcIO      <- a one-entry .zip
+```
+
+— and `ImportChild` faithfully **recreates that path under the destination**. Asking for
+`POUs^MotorSupplyDT^Interfaces` therefore produced
+`POUs^MotorSupplyDT^Interfaces^POUs^ContactorDT^Interfaces^IMotorSupplyDT`, the
+verification (`newParent ^ name`) found nothing there, and the failure path then imported
+the same archive under the **old** parent to restore it — recreating the nested path a
+second time, and colliding on the name, so the "restored" object came back as
+`IMotorSupplyDT_1` four folders deep. Net result of one call: the object gone from where
+it belonged, two nested copies, one of them renamed, and an error message telling the
+caller to import a recovery archive by hand.
+
+It is not an edge case: it happens to **any object that lives in a subfolder**, which in
+a project organised in folders is all of them.
+
+The fix is one step between the export and the import: **repack the archive with the
+source parent's directory prefix stripped from every entry**, so `ImportChild` has no path
+to recreate and drops the object exactly where it was asked to.
+
+- The prefix is derived from the archive itself — the directory segments every entry
+  shares — never from a translated tree path, so there is nothing to keep in sync with how
+  the tree names its nodes.
+- **A folder move keeps the folder's own segment** and strips only its parents, so the
+  moved subtree arrives intact instead of being flattened into the destination.
+- The restore path gets the same flattened archive, so a move that still fails now really
+  does put the original back where it was, instead of leaving a nested duplicate.
+- The response says what happened: `via: "export-flatten-delete-import"` and
+  `strippedPathSegments`, which is `0` when the archive was already flat.
+
+**Exercised on a real reorganisation** (`AUT_StandardDevicesDT`, eight objects out of three
+device folders into four new role folders): eight moves, `strippedPathSegments: 3` each,
+every object landing directly under the requested parent, `check_objects`
+`allObjectsValid: true`, and the `.plcproj` on disk showing exactly eight rewritten
+`<Compile Include>` paths and nothing else touched.
+
+One thing the round trip does change, and it is worth knowing before a move: the file
+comes back **normalised by TwinCAT**. Content, GUIDs and attributes are preserved
+byte for byte, but empty `<Implementation><ST><![CDATA[]]></ST></Implementation>` blocks on
+interface members are dropped (they carry nothing — an interface has no implementation) and
+the file is rewritten with CRLF line endings. On six of the eight objects above the file
+was identical; on the two that still carried those empty blocks the diff was six and nine
+deleted lines, all of them empty implementation envelopes.
+
 ---
 
 ## Change log — which commit carries which change

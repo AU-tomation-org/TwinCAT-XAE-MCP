@@ -1254,9 +1254,10 @@ namespace Te1000Daemon
 
             string tempPath = NewTempExportPath();
             string newPath;
+            int flattened = 0;
             try
             {
-                newPath = ObjectMove(sm, path, newParent, before, tempPath);
+                newPath = ObjectMove(sm, path, newParent, before, tempPath, out flattened);
             }
             finally
             {
@@ -1275,7 +1276,8 @@ namespace Te1000Daemon
             data["newParent"] = newParent;
             data["newPath"] = newPath;
             data["name"] = splitInfo.Name;
-            data["via"] = "export-delete-import";
+            data["via"] = "export-flatten-delete-import";
+            data["strippedPathSegments"] = flattened; // folder segments removed from the archive entries
             SaveIfRequested(ctx);
             return data;
         }
@@ -2615,6 +2617,100 @@ namespace Te1000Daemon
             return System.IO.Path.Combine(System.IO.Path.GetTempPath(), name);
         }
 
+        // Read a .zip written by ExportChild into memory. The archives are tiny (one
+        // .TcPOU/.TcIO of a few KB), so buffering beats streaming them twice.
+        private static void ReadExportEntries(string zipPath, List<string> names, List<byte[]> blobs)
+        {
+            using (var zip = System.IO.Compression.ZipFile.OpenRead(zipPath))
+            {
+                foreach (var entry in zip.Entries)
+                {
+                    if (string.IsNullOrEmpty(entry.Name)) continue; // directory marker: no content
+                    names.Add(entry.FullName.Replace('\\', '/'));
+                    using (var srcStream = entry.Open())
+                    using (var ms = new System.IO.MemoryStream())
+                    {
+                        srcStream.CopyTo(ms);
+                        blobs.Add(ms.ToArray());
+                    }
+                }
+            }
+        }
+
+        // How many leading DIRECTORY segments every entry shares (a file name never counts).
+        private static int CommonDirSegments(List<string> names)
+        {
+            int common = -1;
+            foreach (string n in names)
+            {
+                int dirs = n.Split('/').Length - 1;
+                if (common < 0 || dirs < common) common = dirs;
+            }
+            if (common <= 0) return 0;
+            string[] first = names[0].Split('/');
+            for (int seg = 0; seg < common; seg++)
+            {
+                for (int i = 1; i < names.Count; i++)
+                {
+                    if (!string.Equals(names[i].Split('/')[seg], first[seg], StringComparison.OrdinalIgnoreCase))
+                        return seg;
+                }
+            }
+            return common;
+        }
+
+        private static string DropSegments(string name, int count)
+        {
+            string[] parts = name.Split('/');
+            if (count >= parts.Length) return parts[parts.Length - 1];
+            var sb = new StringBuilder();
+            for (int i = count; i < parts.Length; i++)
+            {
+                if (sb.Length > 0) sb.Append('/');
+                sb.Append(parts[i]);
+            }
+            return sb.ToString();
+        }
+
+        // THE FIX BEHIND A MOVE THAT LANDS. ExportChild writes the object whole
+        // project path into the entry name ("POUs\ContactorDT\Interfaces\IMotorSupplyDT.TcIO")
+        // and ImportChild faithfully RECREATES that path under the destination parent:
+        // the object landed at <newParent>^POUs^ContactorDT^Interfaces^<name>, the
+        // verification by name-path found nothing, and the "restore" import repeated
+        // the trick under the old parent -- a nested duplicate, and no original where
+        // it belonged. Stripping the SOURCE PARENT directory prefix is what makes
+        // ImportChild drop the object exactly where the caller asked for it. On a
+        // FOLDER move the moved folder own segment is kept, so its subtree survives.
+        // Returns how many segments were stripped (0 = archive already flat).
+        private static int FlattenExportArchive(string zipPath, bool movingFolder)
+        {
+            var names = new List<string>();
+            var blobs = new List<byte[]>();
+            ReadExportEntries(zipPath, names, blobs);
+            if (names.Count == 0) return 0;
+
+            int strip = CommonDirSegments(names);
+            if (movingFolder) strip = strip - 1; // drop the parents, keep the folder itself
+            if (strip <= 0) return 0;
+
+            string flatPath = zipPath + ".flat";
+            try { if (System.IO.File.Exists(flatPath)) System.IO.File.Delete(flatPath); } catch { }
+            using (var zip = System.IO.Compression.ZipFile.Open(flatPath, System.IO.Compression.ZipArchiveMode.Create))
+            {
+                for (int i = 0; i < names.Count; i++)
+                {
+                    var entry = zip.CreateEntry(DropSegments(names[i], strip));
+                    using (var dst = entry.Open())
+                    {
+                        dst.Write(blobs[i], 0, blobs[i].Length);
+                    }
+                }
+            }
+            System.IO.File.Copy(flatPath, zipPath, true);
+            try { System.IO.File.Delete(flatPath); } catch { }
+            return strip;
+        }
+
         // Invoke-PlcObjectRename (L3076-3111)
         private static string ObjectRename(dynamic sm, string path, string newName)
         {
@@ -2643,8 +2739,9 @@ namespace Te1000Daemon
         }
 
         // Invoke-PlcObjectMove (L3113-3190) — export(.zip)/delete/import, one attach.
-        private static string ObjectMove(dynamic sm, string path, string newParent, string before, string tempPath)
+        private static string ObjectMove(dynamic sm, string path, string newParent, string before, string tempPath, out int flattened)
         {
+            flattened = 0;
             PathUtil.ParentName split = PathUtil.SplitObjectPath(path);
             PathUtil.AssertMoveLegal(path, newParent);
             PathUtil.AssertNotSafetyPath(path);
@@ -2654,8 +2751,18 @@ namespace Te1000Daemon
             dynamic newParentItem = ComHelpers.GetTreeItem(sm, newParent);
             string beforeName = string.IsNullOrWhiteSpace(before) ? "" : before;
 
+            // A folder keeps its own name segment through the trip; anything else is
+            // stripped down to the bare file (see FlattenExportArchive).
+            bool movingFolder = false;
+            try { movingFolder = ComHelpers.ToInt((object)ComHelpers.GetTreeItem(sm, path).ItemType) == 601; }
+            catch { movingFolder = false; }
+
             // 1) export backup
             oldParent.ExportChild(split.Name, tempPath);
+
+            // 1-bis) repack it flat, or ImportChild recreates the OLD folder path
+            // under the destination and the move lands nowhere near the new parent
+            flattened = FlattenExportArchive(tempPath, movingFolder);
 
             // 2) delete original FIRST (global namespace -> preserve exact name)
             try { oldParent.DeleteChild(split.Name); }

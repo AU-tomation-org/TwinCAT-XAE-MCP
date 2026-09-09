@@ -77,6 +77,14 @@
     <Reference Include="System.Core" />
     <Reference Include="System.Xml" />
     <Reference Include="System.Xml.Linq" />
+    <!--
+      Zip rewriting for plc_pou move: ExportChild bakes the object folder
+      path into the archive entry names and ImportChild recreates it under the
+      destination, so the entries are repacked flat before the import (see
+      PlcPouActions.FlattenExportArchive).
+    -->
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
     <!-- Microsoft.CSharp is required for late-bound `dynamic` COM dispatch. -->
     <Reference Include="Microsoft.CSharp" />
     <!--
