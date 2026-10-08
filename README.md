@@ -10,6 +10,7 @@
 > support for TE1000 integrated in Visual Studio 2022, a severity filter that works on
 > TwinCAT projects, an IDE shutdown that leaves no orphaned `devenv` behind, and a family
 > of `hmi_*` verbs for TwinCAT HMI (TE2000) projects in the same solution.
+> **Setting it up on another machine, or driving it as an AI agent: start from [docs/AGENT-QUICKSTART.md](docs/AGENT-QUICKSTART.md)** (clone URL, branch and ProgID differ from the upstream instructions below).
 > The rest of this README is upstream's and still applies.
 
 > A [Model Context Protocol](https://modelcontextprotocol.io) server for **Beckhoff TwinCAT 3** engineering automation — drive the **TE1000 / XAE Automation Interface** from an AI agent or any MCP client.
