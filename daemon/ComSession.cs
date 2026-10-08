@@ -39,7 +39,7 @@ namespace Te1000Daemon
         // Return a live, cached DTE for (progId, mode); reconnect if stale/dead.
         public dynamic GetDte(string progId, string mode, bool visible = true)
         {
-            if (string.IsNullOrWhiteSpace(progId)) progId = "TcXaeShell.DTE.17.0";
+            if (string.IsNullOrWhiteSpace(progId)) progId = "TcXaeShell.DTE.15.0"; // x86-dte15
             if (string.IsNullOrWhiteSpace(mode)) mode = "active";
 
             if (_dte != null && !_stale && _progId == progId)

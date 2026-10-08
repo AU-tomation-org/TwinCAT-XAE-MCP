@@ -16,7 +16,9 @@
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
-    <Platform Condition=" '$(Platform)' == '' ">x64</Platform>
+    <!-- x86-dte15 branch: built x86 to match the 32-bit TcXaeShell (DTE.15.0,
+         TwinCAT 4024), whose TCatSysManager typelib is registered win32-only. -->
+    <Platform Condition=" '$(Platform)' == '' ">x86</Platform>
     <OutputType>Exe</OutputType>
     <RootNamespace>Te1000Daemon</RootNamespace>
     <AssemblyName>Te1000Daemon</AssemblyName>
@@ -26,7 +28,7 @@
     <!-- The in-box compiler (Framework64\v4.0.30319\csc.exe) only supports C#5. -->
     <LangVersion>5</LangVersion>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
-    <PlatformTarget>x64</PlatformTarget>
+    <PlatformTarget>x86</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
   </PropertyGroup>
   <!--
@@ -40,7 +42,7 @@
     <XaePublicAssemblies Condition="'$(XaePublicAssemblies)' == '' And Exists('C:\Program Files\Beckhoff\TcXaeShell\Common7\IDE\PublicAssemblies\envdte80.dll')">C:\Program Files\Beckhoff\TcXaeShell\Common7\IDE\PublicAssemblies</XaePublicAssemblies>
     <XaePublicAssemblies Condition="'$(XaePublicAssemblies)' == '' And Exists('C:\Program Files (x86)\Beckhoff\TcXaeShell\Common7\IDE\PublicAssemblies\envdte80.dll')">C:\Program Files (x86)\Beckhoff\TcXaeShell\Common7\IDE\PublicAssemblies</XaePublicAssemblies>
   </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|x64' ">
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|x86' ">
     <DebugSymbols>true</DebugSymbols>
     <DebugType>full</DebugType>
     <Optimize>false</Optimize>
@@ -49,7 +51,7 @@
     <ErrorReport>prompt</ErrorReport>
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|x64' ">
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|x86' ">
     <DebugType>pdbonly</DebugType>
     <Optimize>true</Optimize>
     <OutputPath>bin\Release\</OutputPath>
@@ -73,7 +75,9 @@
       HintPath if TwinCAT lives elsewhere.
     -->
     <Reference Include="TCatSysManagerLib">
-      <HintPath>C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\VisualStudio\2022\TCatSysManagerLib.dll</HintPath>
+      <!-- build.ps1 passes the probed path as TCatSysManagerLibPath. -->
+      <HintPath Condition="'$(TCatSysManagerLibPath)' != ''">$(TCatSysManagerLibPath)</HintPath>
+      <HintPath Condition="'$(TCatSysManagerLibPath)' == ''">C:\Program Files (x86)\Beckhoff\TwinCAT\Functions\TE2000-HMI-Engineering\VisualStudio\2022\TCatSysManagerLib.dll</HintPath>
       <EmbedInteropTypes>true</EmbedInteropTypes>
       <Private>false</Private>
     </Reference>
@@ -95,7 +99,8 @@
       <SpecificVersion>false</SpecificVersion>
       <Private>false</Private>
     </Reference>
-    <Reference Include="Microsoft.VisualStudio.Interop">
+    <!-- Absent on the VS2017-based 32-bit shell, where DTE2 lives in envdte80.dll itself. -->
+    <Reference Include="Microsoft.VisualStudio.Interop" Condition="Exists('$(XaePublicAssemblies)\Microsoft.VisualStudio.Interop.dll')">
       <HintPath>$(XaePublicAssemblies)\Microsoft.VisualStudio.Interop.dll</HintPath>
       <SpecificVersion>false</SpecificVersion>
       <Private>false</Private>

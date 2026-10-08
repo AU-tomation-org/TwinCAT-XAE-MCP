@@ -22,7 +22,7 @@ namespace Te1000Daemon
             Session = session;
             Cache = cache;
             Edits = edits;
-            ProgId = Payload.Truthy("progId") ? Payload.Str("progId") : "TcXaeShell.DTE.17.0";
+            ProgId = Payload.Truthy("progId") ? Payload.Str("progId") : "TcXaeShell.DTE.15.0"; // x86-dte15
             Mode = Payload.Truthy("mode") ? Payload.Str("mode") : "active";
         }
 
