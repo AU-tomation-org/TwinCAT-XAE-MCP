@@ -472,22 +472,21 @@ namespace Te1000Daemon
         private static Json.JObj SetTargetPlatform(ActionContext ctx)
         {
             string platform = ctx.Payload.Str("platform");
-            string[] allowed = new string[] { "TwinCAT RT (x86)", "TwinCAT RT (x64)" };
-            bool ok = false;
-            for (int i = 0; i < allowed.Length; i++) { if (allowed[i] == platform) { ok = true; break; } }
-            if (!ok)
+            if (string.IsNullOrWhiteSpace(platform))
             {
-                throw new BridgeException("platform must be exactly one of: '" + string.Join("', '", allowed) + "'");
+                throw new BridgeException("platform is required, e.g. 'TwinCAT OS (x64)' (the user-mode runtime) or 'TwinCAT RT (x64)'");
             }
 
             ctx.Dte(true);
             dynamic sysManager = ctx.SysManagerForTargetAction();
             string prev;
+            string now;
             try
             {
                 dynamic cfg = sysManager.ConfigurationManager;
                 prev = (string)cfg.ActiveTargetPlatform;
                 cfg.ActiveTargetPlatform = platform;
+                now = (string)cfg.ActiveTargetPlatform;
             }
             catch (Exception ex)
             {
@@ -496,8 +495,16 @@ namespace Te1000Daemon
 
             ctx.Cache.Invalidate(null);
 
+            // No hard-coded platform list: 4026 targets carry platforms the old list
+            // never knew (TwinCAT OS (x64) is the UmRT one). Read the property back
+            // instead, so a platform this solution does not offer fails loudly here.
+            if (now != platform)
+            {
+                throw new BridgeException("ActiveTargetPlatform did not take: asked for '" + platform + "', it is still '" + now + "'. Only a platform this solution offers is accepted (see xae list_configurations).");
+            }
+
             var data = new Json.JObj();
-            data["activeTargetPlatform"] = platform;
+            data["activeTargetPlatform"] = now;
             data["previous"] = prev;
             return data;
         }

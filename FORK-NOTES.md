@@ -778,6 +778,20 @@ the file is rewritten with CRLF line endings. On six of the eight objects above 
 was identical; on the two that still carried those empty blocks the diff was six and nine
 deleted lines, all of them empty implementation envelopes.
 
+### 20. `set_target_platform` refused the platform a user-mode runtime needs
+
+`tc_settings set_target_platform` accepted only a hard-coded pair, `TwinCAT RT (x86)` and
+`TwinCAT RT (x64)`. A 4026 solution that targets a user-mode runtime builds for
+**`TwinCAT OS (x64)`**, which the list did not know, so the one platform we actually needed
+was rejected before XAE was ever asked.
+
+The list is gone. The value is written, then **read back**: a platform the solution does not
+offer fails loudly with what is still active, instead of being reported as done. The tool
+description now also says what was learned the hard way: the solution configuration
+(`xae set_configuration`) and the target platform are **independent** — setting one does not
+move the other, and activating with the wrong platform writes a boot project the runtime
+ignores.
+
 ---
 
 ## Change log — which commit carries which change
@@ -801,6 +815,7 @@ per PR, so a reviewer never has to read a commit that belongs to another fix.
 | 2026-09-08 | `9de0090` | §11 | TwinCAT HMI (TE2000): `hmi_project` / `hmi_symbol` / `hmi_function` / `hmi_publish`, the pkgdef-resolved automation ProgId, the HMI project walk and session cache, and the publish pre-flight that refuses a profile which would skip the server-extension configuration. |
 | 2026-09-08 | `3851865` | §12-§18 | `xae output`; `save:true` that actually saves and says whether it settled (the singular POU verbs ignored the flag outright); `save_as_library` reporting the real failure and taking `overwrite`; `create_solution` / `add_project` / `find_project_template`; the HMI side finished -- publish run for real, internal symbols early bound, `hmi_file` for controls; `open_solution`'s own budget plus diagnostics that answer while the STA thread is busy; and `plc_tests`, the TcUnit verdict. `BACKLOG.md` removed. |
 | 2026-09-09 | `bca6377` | §19 | `plc_pou move` repacks the export archive flat, so a move lands under the parent it was given instead of recreating the old folder path under it -- and a failed move restores the original instead of leaving a nested duplicate. |
+| 2026-10-08 | (this commit) | §20 | `set_target_platform` takes any platform the solution offers (`TwinCAT OS (x64)` for a user-mode runtime) and reads it back, instead of a hard-coded RT x86/x64 list. |
 
 Upstream's own [CHANGELOG.md](CHANGELOG.md) is left untouched: it tracks their releases,
 and a fork writing into it would collide on every merge from `upstream`.
