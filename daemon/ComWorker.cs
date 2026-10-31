@@ -237,7 +237,9 @@ namespace Te1000Daemon
                 lock (_lifecycleGate)
                 {
                     var item = new WorkItem { Job = job };
-                    _queue.Add(item);
+                    Interlocked.Increment(ref _queued);
+                    try { _queue.Add(item); }
+                    catch { Interlocked.Decrement(ref _queued); throw; }
                 }
             }
             catch { /* queue completed/disposed — drop silently */ }
