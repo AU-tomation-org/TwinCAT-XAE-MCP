@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TwinCAT XAE MCP</title>
+<link rel="stylesheet" href="/aut.css">
+<link rel="icon" href="data:,">
+</head>
+<body>
+<header>
+  <h1>TwinCAT XAE MCP</h1>
+  <div class="subtitle">MCP server that lets Claude drive Visual Studio and TwinCAT XAE. Read-only view of what it is doing and has done.</div>
+  <div class="meta" id="meta">connecting...</div>
+</header>
+<nav>
+  <button data-tab="ide" class="on">IDE and calls</button>
+  <button data-tab="activity">Activity</button>
+  <button data-tab="tools">Tools</button>
+</nav>
+<main>
+  <section id="ide" class="on">
+    <div class="stats" id="stats"></div>
+    <div class="cards" id="instances"></div>
+    <h3>Running now</h3>
+    <div class="note">A call that stays here is the first sign of a stuck IDE: the begin line of the audit is written before the work starts.</div>
+    <div class="wrap"><table><thead><tr><th>Started</th><th>Action</th><th>Client</th><th>Payload</th></tr></thead><tbody id="flight"></tbody></table></div>
+  </section>
+  <section id="activity">
+    <div class="note">Authentication is not active: names are what the client declares (level <b>none</b>). Calls refused by a confirmation token in the MCP front end never reach the daemon, so they are not listed.</div>
+    <div class="row" style="margin:0 0 12px">
+      <select id="filter"><option value="">all calls</option><option value="guarded">guarded only</option><option value="failed">failed only</option><option value="open">no end line</option></select>
+      <span class="kv" id="folder"></span>
+    </div>
+    <div class="wrap"><table><thead><tr><th>Time</th><th>Action</th><th>Result</th><th>ms</th><th>Project</th><th>Client</th><th>Auth</th><th>Payload</th></tr></thead><tbody id="audit"></tbody></table></div>
+  </section>
+  <section id="tools"><div class="note" id="toolcount"></div><div class="kv mono" id="toollist"></div></section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const esc = v => String(v ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const time = iso => iso ? new Date(iso).toLocaleString() : '';
+const client = c => c ? esc([c.kind, c.user, c.pid].filter(Boolean).join(' ')) : '';
+let tab = 'ide', rows = [];
+
+document.querySelectorAll('nav button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('nav button, section').forEach(e => e.classList.remove('on'));
+  b.classList.add('on'); tab = b.dataset.tab; $(tab).classList.add('on'); refresh();
+});
+$('filter').onchange = renderAudit;
+
+async function api(path) { return (await fetch(path)).json(); }
+
+async function refresh() {
+  const st = await api('/api/state').catch(e => ({ ok: false, error: String(e) }));
+  if (!st.ok) { $('meta').innerHTML = `<span class="bad">${esc(st.error)}</span>`; return; }
+  const s = st.result;
+  $('meta').textContent = `daemon v${s.version} - pid ${s.pid} - started ${time(s.startedAt)} - ${s.actionCount} actions`;
+  if (tab === 'ide') renderIde(s);
+  if (tab === 'activity') { const a = await api('/api/audit?max=600'); rows = merge(a.result?.rows ?? []); $('folder').textContent = a.result?.folder ?? ''; renderAudit(); }
+  if (tab === 'tools') { const t = await api('/api/tools'); const l = (t.result?.actions ?? []).sort(); $('toolcount').textContent = `${l.length} daemon actions`; $('toollist').textContent = l.join('  '); }
+}
+
+function renderIde(s) {
+  const w = s.worker;
+  $('stats').innerHTML = `<div class="stat"><b class="${w.busy ? 'warn' : 'ok'}">${w.busy ? 'busy' : 'idle'}</b><span>IDE thread${w.busy ? ': ' + esc(w.action) + ' for ' + Math.round(w.busyForMs / 1000) + ' s' : ''}</span></div>
+    <div class="stat"><b>${w.queued}</b><span>queued</span></div><div class="stat"><b>${s.ide.count}</b><span>Visual Studio open</span></div>`;
+  $('instances').innerHTML = (s.ide.instances ?? []).map(i => `<div class="card"><h3>${esc(i.windowTitle ?? 'no window title')}</h3><div class="kv">pid ${i.pid}</div></div>`).join('')
+    || `<div class="note">${esc(s.ide.rotError ?? 'No Visual Studio registered. An instance hidden or stuck at start-up does not appear here.')}</div>`;
+  $('flight').innerHTML = s.inFlight.map(c => `<tr><td>${time(c.ts)}</td><td class="mono">${esc(c.action)}</td><td>${client(c.client)}</td><td class="clip mono">${esc(JSON.stringify(c.payload))}</td></tr>`).join('')
+    || '<tr><td colspan="4" class="muted">nothing running</td></tr>';
+}
+
+// The trail has a begin and an end line per call; the page shows one row per call.
+function merge(lines) {
+  const calls = new Map();
+  for (const l of [...lines].reverse()) {
+    const c = calls.get(l.callId) ?? {}; calls.set(l.callId, c);
+    if (l.event === 'begin') Object.assign(c, l); else c.end = l;
+    if (!c.action) c.action = l.action;
+    if (!c.ts) c.ts = l.ts;
+  }
+  return [...calls.values()].reverse();
+}
+
+function renderAudit() {
+  const f = $('filter').value;
+  const list = rows.filter(r => !f || (f === 'guarded' && r.guarded) || (f === 'failed' && r.end && !r.end.ok) || (f === 'open' && !r.end));
+  $('audit').innerHTML = list.map(r => {
+    const e = r.end;
+    const res = !e ? '<span class="warn">no end</span>' : e.ok ? '<span class="ok">ok</span>' : `<span class="bad" title="${esc(e.error)}">${esc(e.errorKind ?? 'failed')}</span>`;
+    return `<tr><td>${time(r.ts)}</td><td class="mono">${esc(r.action)}${r.guarded ? ' <span class="tag real">guarded</span>' : ''}</td><td>${res}</td><td>${e?.durationMs ?? ''}</td><td>${esc(e?.tsProject)}</td><td>${client(r.client)}</td><td>${esc(r.authLevel)}</td><td class="clip mono">${esc(JSON.stringify(r.payload))}</td></tr>`;
+  }).join('') || '<tr><td colspan="8" class="muted">no calls</td></tr>';
+}
+
+refresh(); setInterval(refresh, 3000);
+</script>
+</body>
+</html>

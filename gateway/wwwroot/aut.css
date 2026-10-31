@@ -1,0 +1,47 @@
+/* AUT web kit v1 - the look shared by the AU-tomation server pages.
+   Source of truth: AUT-Platform/webkit/aut.css. Taken from the ABB-RWS-MCP dashboard, so that
+   page already matches. Other projects carry a copy: change it here, then copy it over.
+   No framework and no build step: plain HTML and React pages use the same class names. */
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1d232b; --muted: #637083; --line: #dde2e8;
+  --accent: #2b6cb0; --ok: #2f855a; --warn: #b7791f; --bad: #c53030; --real: #c05621; --virt: #2b6cb0;
+  --mono: Consolas, "Cascadia Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #14171c; --panel: #1c2027; --text: #e3e7ed; --muted: #94a0b2; --line: #2c323c;
+          --accent: #63a4ff; --ok: #48bb78; --warn: #ecc94b; --bad: #fc8181; --real: #f6ad55; --virt: #63a4ff; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.45 "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); }
+header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+header h1 { font-size: 28px; line-height: 30px; margin: 0; letter-spacing: .3px; }
+header .subtitle { flex-basis: 100%; font-size: 14px; margin-top: -4px; }
+header .meta { flex-basis: 100%; color: var(--muted); font-size: 12px; margin-top: -8px; overflow-wrap: anywhere; }
+nav { display: flex; gap: 4px; padding: 8px 20px 0; flex-wrap: wrap; }
+nav button { border: 1px solid var(--line); border-bottom: none; background: transparent; color: var(--muted); padding: 6px 14px; border-radius: 6px 6px 0 0; font: inherit; cursor: pointer; }
+nav button.on { background: var(--panel); color: var(--text); font-weight: 600; }
+main { padding: 16px 20px 40px; }
+section { display: none; } section.on { display: block; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(380px, 100%), 1fr)); gap: 12px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; }
+.card h3 { margin: 0 0 6px; font-size: 15px; display: flex; gap: 8px; align-items: center; }
+.card h3 .tools { margin-left: auto; display: flex; gap: 4px; font-weight: normal; }
+.tag { font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid currentColor; font-weight: 600; }
+.real { color: var(--real); } .virt { color: var(--virt); } .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); } .muted { color: var(--muted); }
+.kv { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+select, input, button.act, a.act { font: inherit; font-size: 12px; padding: 4px 8px; border-radius: 5px; border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+button.act, a.act { cursor: pointer; text-decoration: none; } button.act:disabled { opacity: .45; cursor: default; }
+button.danger { border-color: var(--real); color: var(--real); font-weight: 600; }
+.wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-size: 12px; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+td.mono, .mono { font-family: var(--mono); font-size: 11.5px; }
+td.clip { max-width: 520px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+td.clip:hover { white-space: normal; word-break: break-all; }
+.note { color: var(--muted); font-size: 12px; margin: 8px 0 14px; max-width: 900px; }
+.stats { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 12px; }
+.stat b { display: block; font-size: 20px; }
+.stat span { color: var(--muted); font-size: 12px; }
+pre { white-space: pre-wrap; word-break: break-all; font-family: var(--mono); font-size: 11px; color: var(--muted); }

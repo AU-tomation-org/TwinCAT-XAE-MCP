@@ -794,6 +794,26 @@ ignores.
 
 ---
 
+## Audit trail and dashboard (31/10/2026)
+
+Every call reaching the dispatcher writes a begin line and an end line to
+`%LOCALAPPDATA%\AUT\xae-mcp\audit\audit-<utc day>.jsonl` (`TE1000_AUDIT_DIR` overrides it). The begin
+line comes first so that a call that never returns still leaves a trace. Long strings are kept as
+length plus SHA-256, values under keys that look like secrets are masked, and nothing is deleted.
+
+`gateway/` is a separate ASP.NET Core process with the read-only page, on `http://127.0.0.1:5990`
+and the next free port. It is separate because ASP.NET Core does not run on the daemon's .NET
+Framework 4.7.2, and the IDE automation does not move off it. The daemon starts it if it is built,
+unless `--no-gateway` is given. Two COM-free actions feed it: `audit_query` and `daemon_snapshot`.
+They and `ping` are not audited, or the page's own polling would bury the real calls.
+
+Authentication does not exist yet. Every row says `authLevel: none`, the client name is a claim,
+and every call already passes through `IAccessPolicy` (`AllowAllPolicy`), which is where it plugs in.
+
+Known gaps: a call refused for a wrong confirmation token stops in `index.js` and never reaches the
+daemon, so it is not in the trail; a guarded call is recognised by the presence of `confirm`; and
+a client that talks to the pipe directly is audited but can declare any name.
+
 ## Change log — which commit carries which change
 
 `vs2022-support`, oldest first. The sections above say *why* each change exists; this

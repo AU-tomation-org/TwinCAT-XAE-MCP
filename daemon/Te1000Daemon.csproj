@@ -136,6 +136,8 @@
     <Compile Include="HmiTyped.cs" />
     <Compile Include="Json.cs" />
     <Compile Include="Log.cs" />
+    <Compile Include="AuditLog.cs" />
+    <Compile Include="AccessPolicy.cs" />
     <Compile Include="OleMessageFilter.cs" />
     <Compile Include="ComWorker.cs" />
     <Compile Include="ComSession.cs" />

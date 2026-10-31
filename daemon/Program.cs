@@ -25,6 +25,7 @@ namespace Te1000Daemon
             bool autoDismiss = true;
             int graceMs = 4000;        // matches index.js TE1000_DIALOG_GRACE_MS default
             string allowlist = DefaultAllowlistPath();
+            bool noGateway = false;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -35,6 +36,7 @@ namespace Te1000Daemon
                     case "--no-autodismiss": autoDismiss = false; break;
                     case "--grace-ms": int.TryParse(Next(args, ref i), out graceMs); break;
                     case "--allowlist": allowlist = Next(args, ref i); break;
+                    case "--no-gateway": noGateway = true; break;
                 }
             }
 
@@ -67,6 +69,7 @@ namespace Te1000Daemon
                     var dispatcher = new Dispatcher(worker);
                     Log.Write("Dispatcher ready; " + dispatcher.ActionCount + " actions registered.");
                     var server = new PipeServer(pipeName, dispatcher);
+                    if (!noGateway) StartGateway(pipeName);
 
                     // Run the pipe server on the main thread (blocks until killed).
                     server.Run();
@@ -75,6 +78,32 @@ namespace Te1000Daemon
                 }
             }
             return 0;
+        }
+
+        // The dashboard is a separate process on purpose: ASP.NET Core does not run on this
+        // framework, and the IDE automation does not move off it. It is optional: without it
+        // the daemon works the same, and it guards its own single instance.
+        private static void StartGateway(string pipeName)
+        {
+            try
+            {
+                string exe = Environment.GetEnvironmentVariable("TE1000_GATEWAY_EXE");
+                if (string.IsNullOrEmpty(exe))
+                {
+                    string dir = Path.GetDirectoryName(typeof(Program).Assembly.Location);
+                    exe = Path.GetFullPath(Path.Combine(dir, "..", "..", "..", "gateway", "bin", "Release", "net10.0", "XaeGateway.exe"));
+                }
+                if (!File.Exists(exe)) { Log.Write("Gateway not found at " + exe + "; no dashboard."); return; }
+
+                var info = new System.Diagnostics.ProcessStartInfo(exe, "--pipe \"" + pipeName + "\"")
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WorkingDirectory = Path.GetDirectoryName(exe),
+                };
+                System.Diagnostics.Process.Start(info);
+            }
+            catch (Exception ex) { Log.Error("Program.StartGateway", ex); }
         }
 
         private static string Next(string[] args, ref int i)

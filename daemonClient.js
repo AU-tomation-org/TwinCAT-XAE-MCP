@@ -36,6 +36,15 @@ const DIALOG_WATCH = process.env.TE1000_DIALOG_WATCH !== "0";
 const AUTO_DISMISS = process.env.TE1000_DIALOG_AUTODISMISS !== "0";
 const GRACE_MS = Number(process.env.TE1000_DIALOG_GRACE_MS) || 4000;
 
+// Who is calling, for the audit trail. This is a claim, not an identity: the daemon records
+// it with authLevel "none" until an access policy verifies it.
+const CLIENT = {
+  kind: "mcp",
+  pid: process.pid,
+  user: (() => { try { return require("os").userInfo().username; } catch { return null; } })(),
+  name: process.env.TE1000_CLIENT_NAME || null,
+};
+
 let sock = null;
 let connecting = null;
 let nextId = 1;
@@ -175,7 +184,7 @@ function sendOnce(action, payload) {
     }
 
     try {
-      s.write(JSON.stringify({ id, action, payload }) + "\n");
+      s.write(JSON.stringify({ id, action, payload, client: CLIENT }) + "\n");
     } catch (e) {
       if (timer) { clearTimeout(timer); timer = null; }
       pending.delete(id);

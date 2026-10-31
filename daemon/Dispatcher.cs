@@ -14,6 +14,16 @@ namespace Te1000Daemon
         private readonly ComWorker _worker;
         private readonly TreeCache _cache = new TreeCache();
         private readonly EditWatcher _edits;
+        private readonly AuditLog _audit = new AuditLog();
+        private readonly IAccessPolicy _policy = new AllowAllPolicy();
+        private readonly DateTimeOffset _startedAt = DateTimeOffset.UtcNow;
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Json.JObj> _inFlight =
+            new System.Collections.Concurrent.ConcurrentDictionary<string, Json.JObj>();
+        private long _callSeq;
+
+        // Read by the dashboard every few seconds: auditing them would bury the real calls.
+        private static readonly HashSet<string> UnauditedActions =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ping", "list_actions", "audit_query", "daemon_snapshot" };
 
         public Dispatcher(ComWorker worker)
         {
@@ -57,8 +67,128 @@ namespace Te1000Daemon
         // pass their own larger timeoutMs in the payload, which overrides this.
         private const int DefaultTimeoutMs = 180000; // 3 min generous ceiling
 
-        // Returns the response JObj: {id, ok, result?|error?, errorKind?}.
+        // Returns the response JObj: {id, ok, result?|error?, errorKind?}. Every call passes
+        // here once: the access check, then a begin line, the work, and an end line.
         public Json.JObj Handle(Json.JObj request)
+        {
+            string action = request.Str("action");
+            if (action == "audit_query") return HandleAuditQuery(request);
+            if (action == "daemon_snapshot") return HandleSnapshot(request);
+            if (action != null && UnauditedActions.Contains(action)) return HandleCore(request);
+
+            Json.JObj client = request.Obj("client") ?? new Json.JObj();
+            Json.JObj payload = request.Obj("payload") ?? new Json.JObj();
+            AccessDecision decision = _policy.Check(new AccessRequest
+            {
+                Action = action,
+                Payload = payload,
+                ClientKind = client.Str("kind", "unknown"),
+                Principal = client.Str("user"),
+            });
+
+            string callId = _startedAt.ToUnixTimeMilliseconds().ToString("x") + "-" +
+                            System.Threading.Interlocked.Increment(ref _callSeq);
+            var begin = new Json.JObj();
+            begin["ts"] = DateTimeOffset.UtcNow.ToString("o");
+            begin["event"] = "begin";
+            begin["callId"] = callId;
+            begin["action"] = action;
+            begin["client"] = client;
+            begin["authLevel"] = decision.AuthLevel;
+            begin["decision"] = decision.Allowed ? "allow" : "deny";
+            begin["guarded"] = payload.Truthy("confirm");
+            begin["payload"] = AuditLog.Summarise(payload);
+            _audit.Append(begin);
+
+            Json.JObj resp;
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            _inFlight[callId] = begin;
+            try
+            {
+                if (decision.Allowed) resp = HandleCore(request);
+                else
+                {
+                    resp = new Json.JObj();
+                    resp["id"] = request["id"];
+                    resp["ok"] = false;
+                    resp["error"] = "Refused by the access policy: " + decision.Reason;
+                    resp["errorKind"] = "access_denied";
+                }
+            }
+            catch (Exception ex)
+            {
+                AppendEnd(callId, action, clock, false, ex.GetType().Name + ": " + ex.Message, "exception", null);
+                throw;
+            }
+            finally
+            {
+                Json.JObj ignored;
+                _inFlight.TryRemove(callId, out ignored);
+            }
+
+            AppendEnd(callId, action, clock, resp["ok"] is bool && (bool)resp["ok"],
+                      resp.Str("error"), resp.Str("errorKind"), resp.Obj("result"));
+            return resp;
+        }
+
+        private void AppendEnd(string callId, string action, System.Diagnostics.Stopwatch clock,
+                               bool ok, string error, string errorKind, Json.JObj result)
+        {
+            var end = new Json.JObj();
+            end["ts"] = DateTimeOffset.UtcNow.ToString("o");
+            end["event"] = "end";
+            end["callId"] = callId;
+            end["action"] = action;
+            end["ok"] = ok;
+            end["durationMs"] = clock.ElapsedMilliseconds;
+            if (error != null) end["error"] = error.Length > 500 ? error.Substring(0, 500) : error;
+            if (errorKind != null) end["errorKind"] = errorKind;
+            if (result != null && result.Has("tsProject")) end["tsProject"] = result["tsProject"];
+            _audit.Append(end);
+        }
+
+        private Json.JObj HandleAuditQuery(Json.JObj request)
+        {
+            Json.JObj payload = request.Obj("payload") ?? new Json.JObj();
+            int max = Math.Max(1, Math.Min(payload.Int("max", 300), 5000));
+            var data = new Json.JObj();
+            data["folder"] = _audit.Folder;
+            data["rows"] = _audit.Read(max);
+            var resp = new Json.JObj();
+            resp["id"] = request["id"];
+            resp["ok"] = true;
+            resp["result"] = data;
+            return resp;
+        }
+
+        // COM-free by construction: it must keep answering while the IDE is the thing that
+        // is stuck, so it reads only the daemon's own state and the running-object table.
+        private Json.JObj HandleSnapshot(Json.JObj request)
+        {
+            Json.JObj payload = request.Obj("payload") ?? new Json.JObj();
+            var process = System.Diagnostics.Process.GetCurrentProcess();
+            var data = new Json.JObj();
+            data["pid"] = process.Id;
+            data["startedAt"] = _startedAt.ToString("o");
+            data["actionCount"] = _handlers.Count;
+            data["version"] = typeof(Dispatcher).Assembly.GetName().Version.ToString();
+            data["auditFolder"] = _audit.Folder;
+            data["worker"] = _worker.BusyReport();
+            data["ide"] = OffWorkerDiagnostic("xae_list_instances", payload);
+            ((Json.JObj)data["ide"]).Remove("note");
+            ((Json.JObj)data["ide"]).Remove("servedWithoutSession");
+            ((Json.JObj)data["ide"]).Remove("worker");
+            var calls = new Json.JArr();
+            foreach (Json.JObj call in _inFlight.Values) calls.Add(call);
+            data["inFlight"] = calls;
+            var resp = new Json.JObj();
+            resp["id"] = request["id"];
+            resp["ok"] = true;
+            resp["result"] = data;
+            return resp;
+        }
+
+        private Json.JObj HandleCore(Json.JObj request)
         {
             var resp = new Json.JObj();
             object idVal = request["id"];
@@ -82,7 +212,7 @@ namespace Te1000Daemon
                 resp["ok"] = true;
                 var arr = new Json.JArr();
                 foreach (var k in _handlers.Keys) arr.Add(k);
-                arr.Add("ping"); arr.Add("list_actions"); arr.Add("dialog_probe"); arr.Add("dialog_resolve");
+                arr.Add("ping"); arr.Add("list_actions"); arr.Add("dialog_probe"); arr.Add("dialog_resolve"); arr.Add("audit_query"); arr.Add("daemon_snapshot");
                 var data = new Json.JObj();
                 data["actions"] = arr;
                 data["count"] = arr.Count;
