@@ -55,6 +55,7 @@ app.MapGet("/api/audit", async (int? max) => Results.Text(await Daemon("audit_qu
 app.MapGet("/api/tools", async () => Results.Text(await Daemon("list_actions", new JsonObject()), "application/json"));
 app.MapGet("/", () => Page("index.html", "text/html; charset=utf-8"));
 app.MapGet("/aut.css", () => Page("aut.css", "text/css; charset=utf-8"));
+app.MapGet("/logo.svg", () => Page("logo.svg", "image/svg+xml"));
 app.Run();
 
 IResult Page(string file, string type) => Results.Bytes(File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "wwwroot", file)), type);

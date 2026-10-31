@@ -14,6 +14,8 @@
 * { box-sizing: border-box; }
 body { margin: 0; font: 14px/1.45 "Segoe UI", system-ui, sans-serif; background: var(--bg); color: var(--text); }
 header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+/* The mark alone, without the AU-tomation wording: it reads on light and dark backgrounds. */
+header img.logo { height: 30px; width: auto; display: block; }
 header h1 { font-size: 28px; line-height: 30px; margin: 0; letter-spacing: .3px; }
 header .subtitle { flex-basis: 100%; font-size: 14px; margin-top: -4px; }
 header .meta { flex-basis: 100%; color: var(--muted); font-size: 12px; margin-top: -8px; overflow-wrap: anywhere; }
