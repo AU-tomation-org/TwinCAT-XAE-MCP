@@ -811,6 +811,11 @@ The gateway writes a presence file in `%LOCALAPPDATA%\AUT\presence`, which is ho
 (`AUT-PlatformAdministrationConsole`) finds it. The user guide of the page is in that repository,
 `docs/AUT-Console_Manual.md`, with a PDF in `docs/pdf`.
 
+Sessions with different MCP settings use different pipes, so one machine can run several daemons,
+each with its gateway on the next free port, all writing to the same audit folder. Lines are written
+with the `AppendData` right, which makes each one atomic: plain `FileMode.Append` seeks and then
+writes, and lost 57 lines of 1200 between two daemons.
+
 Authentication does not exist yet. Every row says `authLevel: none`, the client name is a claim,
 and every call already passes through `IAccessPolicy` (`AllowAllPolicy`), which is where it plugs in.
 

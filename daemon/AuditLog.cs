@@ -47,9 +47,17 @@ namespace Te1000Daemon
         {
             try
             {
-                string line = Json.Write(entry) + "\n";
+                byte[] line = new UTF8Encoding(false).GetBytes(Json.Write(entry) + "\n");
                 string path = Path.Combine(_folder, "audit-" + DateTime.UtcNow.ToString("yyyy-MM-dd") + ".jsonl");
-                lock (_gate) File.AppendAllText(path, line, new UTF8Encoding(false));
+
+                // Each Claude session may have its own daemon, and they share this folder. The
+                // AppendData right is what makes the write atomic: FileMode.Append with
+                // FileAccess.Write seeks to the end and then writes, which lost 57 lines of 1200
+                // between two daemons. The buffer must hold a whole line for a single write.
+                lock (_gate)
+                    using (var fs = new FileStream(path, FileMode.Append, System.Security.AccessControl.FileSystemRights.AppendData,
+                                                   FileShare.ReadWrite | FileShare.Delete, line.Length + 1, FileOptions.None))
+                        fs.Write(line, 0, line.Length);
             }
             catch (Exception ex) { Log.Error("AuditLog.Append", ex); }
         }
