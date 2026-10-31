@@ -1,5 +1,5 @@
 /* AUT web kit v1 - the look shared by the AU-tomation server pages.
-   Source of truth: AUT-Platform/webkit/aut.css. Taken from the ABB-RWS-MCP dashboard, so that
+   Source of truth: AUT-PlatformAdministrationConsole/webkit/aut.css. Taken from the ABB-RWS-MCP dashboard, so that
    page already matches. Other projects carry a copy: change it here, then copy it over.
    No framework and no build step: plain HTML and React pages use the same class names. */
 :root {
