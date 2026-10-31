@@ -469,6 +469,8 @@ The [`examples/`](examples/) directory contains:
 | [docs/csharp-daemon-coverage.md](docs/csharp-daemon-coverage.md) | The 164-action port coverage checklist (bridge action → C# handler) |
 | [docs/csharp-daemon-validation.md](docs/csharp-daemon-validation.md) | Build, cut-over, and live-XAE smoke-test guide for the daemon |
 | [docs/notes.md](docs/notes.md) | Running engineering notes / backlog discovered on real projects |
+| [FORK-NOTES.md](FORK-NOTES.md) | What this fork changes, including the audit trail and the dashboard on `http://127.0.0.1:5990` |
+| [AUT Console manual](https://github.com/AU-tomation-org/AUT-PlatformAdministrationConsole/blob/master/docs/AUT-Console_Manual.md) | User guide of the dashboard and of the console that links to it (private repository) |
 | [CHANGELOG.md](CHANGELOG.md) | Version history |
 
 ## Contributing

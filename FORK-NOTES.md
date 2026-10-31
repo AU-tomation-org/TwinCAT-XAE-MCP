@@ -807,6 +807,10 @@ Framework 4.7.2, and the IDE automation does not move off it. The daemon starts 
 unless `--no-gateway` is given. Two COM-free actions feed it: `audit_query` and `daemon_snapshot`.
 They and `ping` are not audited, or the page's own polling would bury the real calls.
 
+The gateway writes a presence file in `%LOCALAPPDATA%\AUT\presence`, which is how the AUT Console
+(`AUT-PlatformAdministrationConsole`) finds it. The user guide of the page is in that repository,
+`docs/AUT-Console_Manual.md`, with a PDF in `docs/pdf`.
+
 Authentication does not exist yet. Every row says `authLevel: none`, the client name is a claim,
 and every call already passes through `IAccessPolicy` (`AllowAllPolicy`), which is where it plugs in.
 
